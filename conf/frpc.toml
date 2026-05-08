@@ -1,0 +1,61 @@
+serverAddr = "127.0.0.1"
+serverPort = 7000
+poolCount = 1
+
+[auth]
+token = "change-me"
+
+[transport]
+protocol = "tcp"
+# protocol = "kcp"
+# protocol = "quic"
+
+[[proxies]]
+name = "ssh"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 22
+remotePort = 6000
+bandwidthLimit = "10MB"
+
+# [proxies.healthCheck]
+# type = "tcp"
+# intervalSeconds = 10
+# timeoutSeconds = 3
+# maxFailed = 3
+
+# [[proxies]]
+# name = "web"
+# type = "http"
+# localIP = "127.0.0.1"
+# localPort = 8081
+# customDomains = ["www.example.com"]
+
+# [[proxies]]
+# name = "secure-web"
+# type = "https"
+# localIP = "127.0.0.1"
+# localPort = 8444
+# customDomains = ["secure.example.com"]
+
+# [[proxies]]
+# name = "dns"
+# type = "udp"
+# localIP = "8.8.8.8"
+# localPort = 53
+# remotePort = 5353
+
+# [[proxies]]
+# name = "private-ssh"
+# type = "stcp"
+# localIP = "127.0.0.1"
+# localPort = 22
+# sk = "private-secret"
+
+# [[visitors]]
+# name = "private-ssh-visitor"
+# type = "stcp"
+# serverName = "private-ssh"
+# bindAddr = "127.0.0.1"
+# bindPort = 16022
+# sk = "private-secret"

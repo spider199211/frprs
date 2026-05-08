@@ -1,0 +1,10 @@
+/target/
+/dist/
+/tools/
+
+*.pdb
+*.log
+*.tmp
+
+.env
+.env.*

@@ -1,0 +1,19 @@
+bindAddr = "0.0.0.0"
+bindPort = 7000
+proxyBindAddr = "0.0.0.0"
+vhostHTTPPort = 0
+vhostHTTPSPort = 0
+dashboardAddr = "127.0.0.1"
+dashboardPort = 7500
+
+[auth]
+token = "change-me"
+
+[transport]
+protocol = "tcp"
+# protocol = "kcp"
+# protocol = "quic"
+
+# [plugins]
+# loginURL = "http://127.0.0.1:9000/login"
+# newProxyURL = "http://127.0.0.1:9000/new_proxy"

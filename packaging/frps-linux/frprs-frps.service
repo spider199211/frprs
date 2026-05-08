@@ -1,0 +1,15 @@
+[Unit]
+Description=frprs frps server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/frprs-frps
+ExecStart=/opt/frprs-frps/frps -c /opt/frprs-frps/conf/frps.toml
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
