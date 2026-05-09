@@ -2,6 +2,156 @@
 
 This is a Rust rewrite scaffold for `fatedier/frp`.
 
+## 中文说明
+
+`frp-rs` 是一个用 Rust 重写 `fatedier/frp` 的实验性实现。当前版本已经实现了反向代理的核心链路，并补充了 STCP visitor、NAT 打洞控制器、QUIC/KCP 传输层等能力。
+
+当前已实现：
+
+- `frps` 服务端程序
+- `frpc` 客户端程序
+- frp 风格 TOML 配置加载
+- token 认证
+- 控制连接登录
+- 动态 TCP 远端监听注册
+- UDP 请求/响应包转发
+- HTTP 虚拟主机转发，按 `Host` 和 `customDomains` 路由
+- HTTPS 透传，按 TLS SNI 和 `customDomains` 路由
+- TCP 健康检查，服务健康时注册代理，不健康时关闭代理
+- 通过 `poolCount` 预创建 work connection 连接池
+- 通过 `bandwidthLimit` 对 TCP/HTTP/HTTPS 做带宽限制
+- `frpc` 根据配置文件修改时间自动热加载
+- 轻量级 `frps` Dashboard，支持 `/` 和 `/api/status`
+- 服务端 HTTP 插件钩子，支持登录和新代理事件
+- STCP 私有 visitor 协议，支持 `sk` 密钥校验和本地 visitor 监听
+- NAT 打洞控制器和控制通道候选地址交换消息
+- 通过 `transport.protocol` 支持 TCP、QUIC、KCP 控制/工作连接传输
+- 按 visitor 请求 work connection
+- 双向 TCP 字节转发
+- 客户端断线自动重连
+
+服务端配置示例：
+
+```toml
+# frps.toml
+bindAddr = "0.0.0.0"
+bindPort = 7000
+proxyBindAddr = "0.0.0.0"
+vhostHTTPPort = 8080
+vhostHTTPSPort = 8443
+dashboardAddr = "127.0.0.1"
+dashboardPort = 7500
+
+[auth]
+token = "secret"
+
+[transport]
+protocol = "tcp"
+# protocol = "kcp"
+# protocol = "quic"
+
+[plugins]
+loginURL = "http://127.0.0.1:9000/login"
+newProxyURL = "http://127.0.0.1:9000/new_proxy"
+```
+
+客户端配置示例：
+
+```toml
+# frpc.toml
+serverAddr = "127.0.0.1"
+serverPort = 7000
+poolCount = 2
+
+[auth]
+token = "secret"
+
+[transport]
+protocol = "tcp"
+# protocol = "kcp"
+# protocol = "quic"
+
+[[proxies]]
+name = "ssh"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 22
+remotePort = 6000
+bandwidthLimit = "10MB"
+
+[proxies.healthCheck]
+type = "tcp"
+intervalSeconds = 10
+timeoutSeconds = 3
+maxFailed = 3
+
+[[proxies]]
+name = "web"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 8081
+customDomains = ["www.example.com"]
+
+[[proxies]]
+name = "secure-web"
+type = "https"
+localIP = "127.0.0.1"
+localPort = 8444
+customDomains = ["secure.example.com"]
+
+[[proxies]]
+name = "dns"
+type = "udp"
+localIP = "8.8.8.8"
+localPort = 53
+remotePort = 5353
+
+[[proxies]]
+name = "private-ssh"
+type = "stcp"
+localIP = "127.0.0.1"
+localPort = 22
+sk = "private-secret"
+
+[[visitors]]
+name = "private-ssh-visitor"
+type = "stcp"
+serverName = "private-ssh"
+bindAddr = "127.0.0.1"
+bindPort = 16022
+sk = "private-secret"
+```
+
+运行：
+
+```bash
+cargo run --bin frps -- -c conf/frps.toml
+cargo run --bin frpc -- -c conf/frpc.toml
+```
+
+功能路线图：
+
+- TCP：已实现基础反向代理链路。
+- HTTP：已实现按 `Host` 的基础转发；路径路由、请求头改写、Basic Auth、真实 IP 请求头、分组等仍待完善。
+- UDP：已实现基础请求/响应转发；NAT 会话复用、批量处理和包级优化仍待完善。
+- HTTPS：已实现 SNI 嗅探和原始 TLS 透传；通配域名和高级 fallback 行为仍待完善。
+- 健康检查：已实现 TCP 健康检查；HTTP 检查和更丰富的状态上报仍待完善。
+- 连接池：已通过 `poolCount` 实现预创建 work connection。
+- 带宽限制：已实现按代理限速。
+- Dashboard：已实现内置状态页面和 JSON API。
+- 插件：已实现服务端登录和新代理 plain HTTP 钩子。
+- 热加载：`frpc` 会监听配置文件修改时间并自动重连。
+- QUIC/KCP：已实现真实控制/工作连接传输，并有端到端代理测试覆盖。
+- STCP：已实现 TCP 流的私有 visitor 转发。
+- SUDP/XTCP/P2P：已具备 NAT 控制器基础，还需要补 UDP visitor 和完整 P2P 数据面。
+- Transport：后续继续补 TLS、WebSocket、TCP mux 等传输能力。
+- 运行时控制：后续补 Admin API、更多状态 API、指标等。
+- 策略能力：后续补端口白名单、分组、负载均衡等。
+- 插件能力：后续补客户端插件钩子和更多协议兼容。
+- VirtualNet 和 SSH tunnel gateway：作为独立里程碑实现。
+
+## English
+
 The current milestone implements the core reverse TCP proxy path:
 
 - `frps` server binary
