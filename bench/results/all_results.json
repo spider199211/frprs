@@ -1,0 +1,3080 @@
+[
+  {
+    "name": "frp",
+    "frps_pid": 120616,
+    "frpc_pid": 117204,
+    "ports": {
+      "control": 57428,
+      "remote": 57429,
+      "echo": 57430
+    },
+    "load": {
+      "concurrency": 100,
+      "requests_per_conn": 200,
+      "total_requests": 20000,
+      "ok_requests": 20000,
+      "errors": 0,
+      "duration_seconds": 1.5218853000551462,
+      "requests_per_second": 13141.5948358758,
+      "throughput_mib_per_second": 6.41679435345498,
+      "latency_ms": {
+        "min": 4.033599980175495,
+        "avg": 7.580566401197575,
+        "p50": 4.767300095409155,
+        "p95": 5.625400226563215,
+        "p99": 8.544899988919497,
+        "max": 281.04199981316924
+      },
+      "connected": 100,
+      "connect_seconds": 1.2686908999457955,
+      "cpu_seconds_per_1k_requests": 0.11875
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 2.375,
+      "peak_working_set_mib": 33.0703125,
+      "peak_private_mib": 40.11328125,
+      "processes": [
+        {
+          "pid": 117204,
+          "name": "frpc",
+          "cpu_seconds_delta": 1.5625,
+          "peak_working_set_mib": 31.42578125,
+          "peak_private_mib": 40.11328125
+        },
+        {
+          "pid": 120616,
+          "name": "frps",
+          "cpu_seconds_delta": 0.8125,
+          "peak_working_set_mib": 33.0703125,
+          "peak_private_mib": 39.31640625
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c100\\run1\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c100\\run1\\frp\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 48248,
+    "frpc_pid": 120524,
+    "ports": {
+      "control": 58193,
+      "remote": 58195,
+      "echo": 58197
+    },
+    "load": {
+      "concurrency": 100,
+      "requests_per_conn": 200,
+      "total_requests": 20000,
+      "ok_requests": 20000,
+      "errors": 0,
+      "duration_seconds": 1.6089078998193145,
+      "requests_per_second": 12430.792341964425,
+      "throughput_mib_per_second": 6.069722823224817,
+      "latency_ms": {
+        "min": 3.5520996898412704,
+        "avg": 7.913015670632012,
+        "p50": 5.047500133514404,
+        "p95": 6.389799993485212,
+        "p99": 22.358700167387724,
+        "max": 290.13560013845563
+      },
+      "connected": 100,
+      "connect_seconds": 1.2663218998350203,
+      "cpu_seconds_per_1k_requests": 0.13046875
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 2.609375,
+      "peak_working_set_mib": 10.015625,
+      "peak_private_mib": 5.20703125,
+      "processes": [
+        {
+          "pid": 120524,
+          "name": "frpc",
+          "cpu_seconds_delta": 1.515625,
+          "peak_working_set_mib": 10.015625,
+          "peak_private_mib": 5.20703125
+        },
+        {
+          "pid": 48248,
+          "name": "frps",
+          "cpu_seconds_delta": 1.09375,
+          "peak_working_set_mib": 9.91015625,
+          "peak_private_mib": 5.09765625
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c100\\run1\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c100\\run1\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp",
+    "frps_pid": 94932,
+    "frpc_pid": 100372,
+    "ports": {
+      "control": 61520,
+      "remote": 61522,
+      "echo": 61525
+    },
+    "load": {
+      "concurrency": 100,
+      "requests_per_conn": 200,
+      "total_requests": 20000,
+      "ok_requests": 20000,
+      "errors": 0,
+      "duration_seconds": 1.5071661998517811,
+      "requests_per_second": 13269.9366546084,
+      "throughput_mib_per_second": 6.479461257133008,
+      "latency_ms": {
+        "min": 4.1589997708797455,
+        "avg": 7.4987854594830425,
+        "p50": 4.789900034666061,
+        "p95": 5.789699964225292,
+        "p99": 8.504599798470736,
+        "max": 268.5370999388397
+      },
+      "connected": 100,
+      "connect_seconds": 1.300172199960798,
+      "cpu_seconds_per_1k_requests": 0.11171875
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 2.234375,
+      "peak_working_set_mib": 33.02734375,
+      "peak_private_mib": 39.36328125,
+      "processes": [
+        {
+          "pid": 100372,
+          "name": "frpc",
+          "cpu_seconds_delta": 1.328125,
+          "peak_working_set_mib": 30.96875,
+          "peak_private_mib": 39.36328125
+        },
+        {
+          "pid": 94932,
+          "name": "frps",
+          "cpu_seconds_delta": 0.90625,
+          "peak_working_set_mib": 33.02734375,
+          "peak_private_mib": 38.3359375
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c100\\run2\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c100\\run2\\frp\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 115844,
+    "frpc_pid": 94660,
+    "ports": {
+      "control": 50634,
+      "remote": 50635,
+      "echo": 50638
+    },
+    "load": {
+      "concurrency": 100,
+      "requests_per_conn": 200,
+      "total_requests": 20000,
+      "ok_requests": 20000,
+      "errors": 0,
+      "duration_seconds": 1.5775551996193826,
+      "requests_per_second": 12677.84481001071,
+      "throughput_mib_per_second": 6.190353911138042,
+      "latency_ms": {
+        "min": 3.405400086194277,
+        "avg": 7.773789360001683,
+        "p50": 5.021299701184034,
+        "p95": 6.580499932169914,
+        "p99": 11.534100398421288,
+        "max": 266.7458998039365
+      },
+      "connected": 100,
+      "connect_seconds": 1.2830043998546898,
+      "cpu_seconds_per_1k_requests": 0.1265625
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 2.53125,
+      "peak_working_set_mib": 10.078125,
+      "peak_private_mib": 5.2578125,
+      "processes": [
+        {
+          "pid": 94660,
+          "name": "frpc",
+          "cpu_seconds_delta": 1.328125,
+          "peak_working_set_mib": 10.078125,
+          "peak_private_mib": 5.2578125
+        },
+        {
+          "pid": 115844,
+          "name": "frps",
+          "cpu_seconds_delta": 1.203125,
+          "peak_working_set_mib": 9.62109375,
+          "peak_private_mib": 4.609375
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c100\\run2\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c100\\run2\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp",
+    "frps_pid": 56932,
+    "frpc_pid": 44100,
+    "ports": {
+      "control": 54541,
+      "remote": 54743,
+      "echo": 54744
+    },
+    "load": {
+      "concurrency": 100,
+      "requests_per_conn": 200,
+      "total_requests": 20000,
+      "ok_requests": 20000,
+      "errors": 0,
+      "duration_seconds": 1.6864394000731409,
+      "requests_per_second": 11859.305468748298,
+      "throughput_mib_per_second": 5.790676498412255,
+      "latency_ms": {
+        "min": 3.462399821728468,
+        "avg": 8.372079395432957,
+        "p50": 5.255799740552902,
+        "p95": 6.644700188189745,
+        "p99": 41.566300205886364,
+        "max": 295.8646002225578
+      },
+      "connected": 100,
+      "connect_seconds": 1.3005971000529826,
+      "cpu_seconds_per_1k_requests": 0.12890625
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 2.578125,
+      "peak_working_set_mib": 33.28125,
+      "peak_private_mib": 40.2890625,
+      "processes": [
+        {
+          "pid": 44100,
+          "name": "frpc",
+          "cpu_seconds_delta": 1.265625,
+          "peak_working_set_mib": 31.140625,
+          "peak_private_mib": 40.2890625
+        },
+        {
+          "pid": 56932,
+          "name": "frps",
+          "cpu_seconds_delta": 1.3125,
+          "peak_working_set_mib": 33.28125,
+          "peak_private_mib": 40.19921875
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c100\\run3\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c100\\run3\\frp\\logs\\frpc.log"
+    },
+    "run": 3
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 105752,
+    "frpc_pid": 117740,
+    "ports": {
+      "control": 55862,
+      "remote": 55863,
+      "echo": 55864
+    },
+    "load": {
+      "concurrency": 100,
+      "requests_per_conn": 200,
+      "total_requests": 20000,
+      "ok_requests": 20000,
+      "errors": 0,
+      "duration_seconds": 1.545945500023663,
+      "requests_per_second": 12937.06666871107,
+      "throughput_mib_per_second": 6.316927084331577,
+      "latency_ms": {
+        "min": 3.4328000620007515,
+        "avg": 7.644343181978911,
+        "p50": 4.867800045758486,
+        "p95": 6.1702001839876175,
+        "p99": 7.357900030910969,
+        "max": 273.4472001902759
+      },
+      "connected": 100,
+      "connect_seconds": 1.278640799690038,
+      "cpu_seconds_per_1k_requests": 0.14296875
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 2.859375,
+      "peak_working_set_mib": 9.9375,
+      "peak_private_mib": 5.125,
+      "processes": [
+        {
+          "pid": 117740,
+          "name": "frpc",
+          "cpu_seconds_delta": 1.703125,
+          "peak_working_set_mib": 9.9375,
+          "peak_private_mib": 5.125
+        },
+        {
+          "pid": 105752,
+          "name": "frps",
+          "cpu_seconds_delta": 1.15625,
+          "peak_working_set_mib": 9.7109375,
+          "peak_private_mib": 4.76171875
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c100\\run3\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c100\\run3\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 3
+  },
+  {
+    "name": "frp",
+    "frps_pid": 35508,
+    "frpc_pid": 62392,
+    "ports": {
+      "control": 56432,
+      "remote": 56433,
+      "echo": 56434
+    },
+    "load": {
+      "concurrency": 150,
+      "requests_per_conn": 200,
+      "total_requests": 30000,
+      "ok_requests": 30000,
+      "errors": 0,
+      "duration_seconds": 2.452949400059879,
+      "requests_per_second": 12230.17482515851,
+      "throughput_mib_per_second": 5.971765051346929,
+      "latency_ms": {
+        "min": 6.785099860280752,
+        "avg": 12.234880810293058,
+        "p50": 8.047000039368868,
+        "p95": 9.540800005197525,
+        "p99": 275.31549986451864,
+        "max": 288.5680999606848
+      },
+      "connected": 150,
+      "connect_seconds": 1.2534544002264738,
+      "cpu_seconds_per_1k_requests": 0.0875
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 2.625,
+      "peak_working_set_mib": 39.70703125,
+      "peak_private_mib": 47.890625,
+      "processes": [
+        {
+          "pid": 62392,
+          "name": "frpc",
+          "cpu_seconds_delta": 1.46875,
+          "peak_working_set_mib": 38.04296875,
+          "peak_private_mib": 47.890625
+        },
+        {
+          "pid": 35508,
+          "name": "frps",
+          "cpu_seconds_delta": 1.15625,
+          "peak_working_set_mib": 39.70703125,
+          "peak_private_mib": 47.07421875
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c150\\run1\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c150\\run1\\frp\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 117704,
+    "frpc_pid": 4496,
+    "ports": {
+      "control": 57150,
+      "remote": 57151,
+      "echo": 57152
+    },
+    "load": {
+      "concurrency": 150,
+      "requests_per_conn": 200,
+      "total_requests": 30000,
+      "ok_requests": 30000,
+      "errors": 0,
+      "duration_seconds": 2.439249800052494,
+      "requests_per_second": 12298.86336338098,
+      "throughput_mib_per_second": 6.005304376650869,
+      "latency_ms": {
+        "min": 6.309800315648317,
+        "avg": 12.16154193598777,
+        "p50": 8.107000030577183,
+        "p95": 10.087300091981888,
+        "p99": 268.25720025226474,
+        "max": 275.22610034793615
+      },
+      "connected": 150,
+      "connect_seconds": 1.270576300099492,
+      "cpu_seconds_per_1k_requests": 0.12604166666666666
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 3.78125,
+      "peak_working_set_mib": 10.98828125,
+      "peak_private_mib": 6.171875,
+      "processes": [
+        {
+          "pid": 4496,
+          "name": "frpc",
+          "cpu_seconds_delta": 2.203125,
+          "peak_working_set_mib": 10.98828125,
+          "peak_private_mib": 6.171875
+        },
+        {
+          "pid": 117704,
+          "name": "frps",
+          "cpu_seconds_delta": 1.578125,
+          "peak_working_set_mib": 10.734375,
+          "peak_private_mib": 5.78515625
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c150\\run1\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c150\\run1\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp",
+    "frps_pid": 111048,
+    "frpc_pid": 107644,
+    "ports": {
+      "control": 57941,
+      "remote": 57942,
+      "echo": 57944
+    },
+    "load": {
+      "concurrency": 150,
+      "requests_per_conn": 200,
+      "total_requests": 30000,
+      "ok_requests": 30000,
+      "errors": 0,
+      "duration_seconds": 2.4532711999490857,
+      "requests_per_second": 12228.57057166065,
+      "throughput_mib_per_second": 5.970981724443677,
+      "latency_ms": {
+        "min": 5.717199761420488,
+        "avg": 12.235547234211117,
+        "p50": 7.9367998987436295,
+        "p95": 9.725399781018496,
+        "p99": 274.54760018736124,
+        "max": 290.61400005593896
+      },
+      "connected": 150,
+      "connect_seconds": 1.2718287999741733,
+      "cpu_seconds_per_1k_requests": 0.115625
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 3.46875,
+      "peak_working_set_mib": 38.83203125,
+      "peak_private_mib": 46.44921875,
+      "processes": [
+        {
+          "pid": 107644,
+          "name": "frpc",
+          "cpu_seconds_delta": 1.9375,
+          "peak_working_set_mib": 36.765625,
+          "peak_private_mib": 46.34765625
+        },
+        {
+          "pid": 111048,
+          "name": "frps",
+          "cpu_seconds_delta": 1.53125,
+          "peak_working_set_mib": 38.83203125,
+          "peak_private_mib": 46.44921875
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c150\\run2\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c150\\run2\\frp\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 108328,
+    "frpc_pid": 115060,
+    "ports": {
+      "control": 59181,
+      "remote": 59182,
+      "echo": 59183
+    },
+    "load": {
+      "concurrency": 150,
+      "requests_per_conn": 200,
+      "total_requests": 30000,
+      "ok_requests": 30000,
+      "errors": 0,
+      "duration_seconds": 2.8368592001497746,
+      "requests_per_second": 10575.075420879584,
+      "throughput_mib_per_second": 5.1636110453513595,
+      "latency_ms": {
+        "min": 5.429599899798632,
+        "avg": 12.777582752316569,
+        "p50": 8.402399718761444,
+        "p95": 10.002899914979935,
+        "p99": 275.2286996692419,
+        "max": 292.78430016711354
+      },
+      "connected": 150,
+      "connect_seconds": 1.2691416000016034,
+      "cpu_seconds_per_1k_requests": 0.1140625
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 3.421875,
+      "peak_working_set_mib": 10.98046875,
+      "peak_private_mib": 6.11328125,
+      "processes": [
+        {
+          "pid": 115060,
+          "name": "frpc",
+          "cpu_seconds_delta": 1.625,
+          "peak_working_set_mib": 10.98046875,
+          "peak_private_mib": 6.11328125
+        },
+        {
+          "pid": 108328,
+          "name": "frps",
+          "cpu_seconds_delta": 1.796875,
+          "peak_working_set_mib": 10.75,
+          "peak_private_mib": 5.7578125
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c150\\run2\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c150\\run2\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp",
+    "frps_pid": 105752,
+    "frpc_pid": 98340,
+    "ports": {
+      "control": 58829,
+      "remote": 58831,
+      "echo": 58836
+    },
+    "load": {
+      "concurrency": 150,
+      "requests_per_conn": 200,
+      "total_requests": 30000,
+      "ok_requests": 30000,
+      "errors": 0,
+      "duration_seconds": 2.497236200142652,
+      "requests_per_second": 12013.280921639003,
+      "throughput_mib_per_second": 5.865859825019045,
+      "latency_ms": {
+        "min": 6.241000257432461,
+        "avg": 12.399407892224069,
+        "p50": 8.286300115287304,
+        "p95": 9.530399926006794,
+        "p99": 274.60339991375804,
+        "max": 293.5515996068716
+      },
+      "connected": 150,
+      "connect_seconds": 1.2865797001868486,
+      "cpu_seconds_per_1k_requests": 0.09166666666666667
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 2.75,
+      "peak_working_set_mib": 38.76953125,
+      "peak_private_mib": 45.3984375,
+      "processes": [
+        {
+          "pid": 98340,
+          "name": "frpc",
+          "cpu_seconds_delta": 1.46875,
+          "peak_working_set_mib": 35.6171875,
+          "peak_private_mib": 44.953125
+        },
+        {
+          "pid": 105752,
+          "name": "frps",
+          "cpu_seconds_delta": 1.28125,
+          "peak_working_set_mib": 38.76953125,
+          "peak_private_mib": 45.3984375
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c150\\run3\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c150\\run3\\frp\\logs\\frpc.log"
+    },
+    "run": 3
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 107588,
+    "frpc_pid": 120392,
+    "ports": {
+      "control": 60723,
+      "remote": 60724,
+      "echo": 60726
+    },
+    "load": {
+      "concurrency": 150,
+      "requests_per_conn": 200,
+      "total_requests": 30000,
+      "ok_requests": 30000,
+      "errors": 0,
+      "duration_seconds": 2.433311500120908,
+      "requests_per_second": 12328.877744797303,
+      "throughput_mib_per_second": 6.019959836326808,
+      "latency_ms": {
+        "min": 5.567899905145168,
+        "avg": 12.13059969455935,
+        "p50": 8.104100357741117,
+        "p95": 9.810399729758501,
+        "p99": 269.8544003069401,
+        "max": 274.7319000773132
+      },
+      "connected": 150,
+      "connect_seconds": 1.3041034997440875,
+      "cpu_seconds_per_1k_requests": 0.12812500000000002
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 3.84375,
+      "peak_working_set_mib": 10.98828125,
+      "peak_private_mib": 6.15625,
+      "processes": [
+        {
+          "pid": 120392,
+          "name": "frpc",
+          "cpu_seconds_delta": 2.28125,
+          "peak_working_set_mib": 10.98828125,
+          "peak_private_mib": 6.15625
+        },
+        {
+          "pid": 107588,
+          "name": "frps",
+          "cpu_seconds_delta": 1.5625,
+          "peak_working_set_mib": 10.73828125,
+          "peak_private_mib": 5.82421875
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c150\\run3\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c150\\run3\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 3
+  },
+  {
+    "name": "frp",
+    "frps_pid": 105896,
+    "frpc_pid": 46244,
+    "ports": {
+      "control": 61660,
+      "remote": 61661,
+      "echo": 61662
+    },
+    "load": {
+      "concurrency": 200,
+      "requests_per_conn": 200,
+      "total_requests": 40000,
+      "ok_requests": 40000,
+      "errors": 0,
+      "duration_seconds": 3.754046800080687,
+      "requests_per_second": 10655.16817721619,
+      "throughput_mib_per_second": 5.202718836531343,
+      "latency_ms": {
+        "min": 8.663299959152937,
+        "avg": 18.550765460601543,
+        "p50": 11.60299964249134,
+        "p95": 14.395299833267927,
+        "p99": 283.625400159508,
+        "max": 288.6439999565482
+      },
+      "connected": 200,
+      "connect_seconds": 1.2690603001974523,
+      "cpu_seconds_per_1k_requests": 0.12109375
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 4.84375,
+      "peak_working_set_mib": 44.80859375,
+      "peak_private_mib": 55.9609375,
+      "processes": [
+        {
+          "pid": 46244,
+          "name": "frpc",
+          "cpu_seconds_delta": 2.625,
+          "peak_working_set_mib": 44.80859375,
+          "peak_private_mib": 55.9609375
+        },
+        {
+          "pid": 105896,
+          "name": "frps",
+          "cpu_seconds_delta": 2.21875,
+          "peak_working_set_mib": 43.90234375,
+          "peak_private_mib": 52.5703125
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c200\\run1\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c200\\run1\\frp\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 117544,
+    "frpc_pid": 110248,
+    "ports": {
+      "control": 62827,
+      "remote": 62828,
+      "echo": 62829
+    },
+    "load": {
+      "concurrency": 200,
+      "requests_per_conn": 200,
+      "total_requests": 40000,
+      "ok_requests": 40000,
+      "errors": 0,
+      "duration_seconds": 3.720703899860382,
+      "requests_per_second": 10750.653929086102,
+      "throughput_mib_per_second": 5.249342738811573,
+      "latency_ms": {
+        "min": 7.908999919891357,
+        "avg": 18.3726167599787,
+        "p50": 11.575200129300356,
+        "p95": 14.758800156414509,
+        "p99": 276.5655000694096,
+        "max": 293.0032000876963
+      },
+      "connected": 200,
+      "connect_seconds": 1.2698671002872288,
+      "cpu_seconds_per_1k_requests": 0.134765625
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 5.390625,
+      "peak_working_set_mib": 11.88671875,
+      "peak_private_mib": 7.0703125,
+      "processes": [
+        {
+          "pid": 110248,
+          "name": "frpc",
+          "cpu_seconds_delta": 2.921875,
+          "peak_working_set_mib": 11.88671875,
+          "peak_private_mib": 7.0703125
+        },
+        {
+          "pid": 117544,
+          "name": "frps",
+          "cpu_seconds_delta": 2.46875,
+          "peak_working_set_mib": 11.71875,
+          "peak_private_mib": 6.76953125
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c200\\run1\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c200\\run1\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp",
+    "frps_pid": 39572,
+    "frpc_pid": 62392,
+    "ports": {
+      "control": 63691,
+      "remote": 63692,
+      "echo": 63693
+    },
+    "load": {
+      "concurrency": 200,
+      "requests_per_conn": 200,
+      "total_requests": 40000,
+      "ok_requests": 40000,
+      "errors": 0,
+      "duration_seconds": 3.9187178001739085,
+      "requests_per_second": 10207.420396085894,
+      "throughput_mib_per_second": 4.984091990276315,
+      "latency_ms": {
+        "min": 9.386000223457813,
+        "avg": 19.419612537010106,
+        "p50": 12.185700237751007,
+        "p95": 15.910400077700615,
+        "p99": 299.8915002681315,
+        "max": 301.8845999613404
+      },
+      "connected": 200,
+      "connect_seconds": 1.257782599888742,
+      "cpu_seconds_per_1k_requests": 0.10585937499999999
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 4.234375,
+      "peak_working_set_mib": 43.98828125,
+      "peak_private_mib": 54.7578125,
+      "processes": [
+        {
+          "pid": 62392,
+          "name": "frpc",
+          "cpu_seconds_delta": 2.484375,
+          "peak_working_set_mib": 43.765625,
+          "peak_private_mib": 54.7578125
+        },
+        {
+          "pid": 39572,
+          "name": "frps",
+          "cpu_seconds_delta": 1.75,
+          "peak_working_set_mib": 43.98828125,
+          "peak_private_mib": 52.40625
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c200\\run2\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c200\\run2\\frp\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 67344,
+    "frpc_pid": 112112,
+    "ports": {
+      "control": 64558,
+      "remote": 64559,
+      "echo": 64560
+    },
+    "load": {
+      "concurrency": 200,
+      "requests_per_conn": 200,
+      "total_requests": 40000,
+      "ok_requests": 40000,
+      "errors": 0,
+      "duration_seconds": 4.925526399631053,
+      "requests_per_second": 8120.95941725055,
+      "throughput_mib_per_second": 3.9653122154543703,
+      "latency_ms": {
+        "min": 9.59870032966137,
+        "avg": 24.52457819522824,
+        "p50": 12.006800156086683,
+        "p95": 14.552199747413397,
+        "p99": 291.3856999948621,
+        "max": 1340.3309001587331
+      },
+      "connected": 200,
+      "connect_seconds": 1.2541447998955846,
+      "cpu_seconds_per_1k_requests": 0.172265625
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 6.890625,
+      "peak_working_set_mib": 11.95703125,
+      "peak_private_mib": 7.125,
+      "processes": [
+        {
+          "pid": 112112,
+          "name": "frpc",
+          "cpu_seconds_delta": 4.015625,
+          "peak_working_set_mib": 11.95703125,
+          "peak_private_mib": 7.125
+        },
+        {
+          "pid": 67344,
+          "name": "frps",
+          "cpu_seconds_delta": 2.875,
+          "peak_working_set_mib": 11.6328125,
+          "peak_private_mib": 6.65234375
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c200\\run2\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c200\\run2\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp",
+    "frps_pid": 117960,
+    "frpc_pid": 116504,
+    "ports": {
+      "control": 65424,
+      "remote": 65425,
+      "echo": 65426
+    },
+    "load": {
+      "concurrency": 200,
+      "requests_per_conn": 200,
+      "total_requests": 40000,
+      "ok_requests": 40000,
+      "errors": 0,
+      "duration_seconds": 5.649687699973583,
+      "requests_per_second": 7080.037362098268,
+      "throughput_mib_per_second": 3.457049493212045,
+      "latency_ms": {
+        "min": 8.176400326192379,
+        "avg": 26.707980248413513,
+        "p50": 15.860999934375286,
+        "p95": 23.96050002425909,
+        "p99": 302.3288999684155,
+        "max": 722.7678997442126
+      },
+      "connected": 200,
+      "connect_seconds": 1.2775151003152132,
+      "cpu_seconds_per_1k_requests": 0.1171875
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 4.6875,
+      "peak_working_set_mib": 44.25390625,
+      "peak_private_mib": 54.24609375,
+      "processes": [
+        {
+          "pid": 116504,
+          "name": "frpc",
+          "cpu_seconds_delta": 2.546875,
+          "peak_working_set_mib": 43.37109375,
+          "peak_private_mib": 54.24609375
+        },
+        {
+          "pid": 117960,
+          "name": "frps",
+          "cpu_seconds_delta": 2.140625,
+          "peak_working_set_mib": 44.25390625,
+          "peak_private_mib": 52.07421875
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c200\\run3\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c200\\run3\\frp\\logs\\frpc.log"
+    },
+    "run": 3
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 55540,
+    "frpc_pid": 78748,
+    "ports": {
+      "control": 60851,
+      "remote": 60852,
+      "echo": 60853
+    },
+    "load": {
+      "concurrency": 200,
+      "requests_per_conn": 200,
+      "total_requests": 40000,
+      "ok_requests": 40000,
+      "errors": 0,
+      "duration_seconds": 4.007223600056022,
+      "requests_per_second": 9981.973553819354,
+      "throughput_mib_per_second": 4.874010524325857,
+      "latency_ms": {
+        "min": 9.003600105643272,
+        "avg": 19.854696054873056,
+        "p50": 12.151400092989206,
+        "p95": 20.568699575960636,
+        "p99": 279.1339000687003,
+        "max": 294.947300106287
+      },
+      "connected": 200,
+      "connect_seconds": 1.2930089002475142,
+      "cpu_seconds_per_1k_requests": 0.133984375
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 5.359375,
+      "peak_working_set_mib": 11.96875,
+      "peak_private_mib": 7.1484375,
+      "processes": [
+        {
+          "pid": 78748,
+          "name": "frpc",
+          "cpu_seconds_delta": 2.875,
+          "peak_working_set_mib": 11.96875,
+          "peak_private_mib": 7.1484375
+        },
+        {
+          "pid": 55540,
+          "name": "frps",
+          "cpu_seconds_delta": 2.484375,
+          "peak_working_set_mib": 11.66796875,
+          "peak_private_mib": 6.67578125
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c200\\run3\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c200\\run3\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 3
+  },
+  {
+    "name": "frp",
+    "frps_pid": 42476,
+    "frpc_pid": 66260,
+    "ports": {
+      "control": 52732,
+      "remote": 52733,
+      "echo": 52734
+    },
+    "load": {
+      "concurrency": 250,
+      "requests_per_conn": 200,
+      "total_requests": 50000,
+      "ok_requests": 50000,
+      "errors": 0,
+      "duration_seconds": 5.120124300010502,
+      "requests_per_second": 9765.387922300528,
+      "throughput_mib_per_second": 4.768255821435805,
+      "latency_ms": {
+        "min": 10.472600348293781,
+        "avg": 25.515662127630787,
+        "p50": 15.059399884194136,
+        "p95": 28.042899910360575,
+        "p99": 285.72829999029636,
+        "max": 288.2665996439755
+      },
+      "connected": 250,
+      "connect_seconds": 1.2793775997124612,
+      "cpu_seconds_per_1k_requests": 0.094375
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 4.71875,
+      "peak_working_set_mib": 49.50390625,
+      "peak_private_mib": 59.984375,
+      "processes": [
+        {
+          "pid": 66260,
+          "name": "frpc",
+          "cpu_seconds_delta": 2.34375,
+          "peak_working_set_mib": 48.9921875,
+          "peak_private_mib": 59.984375
+        },
+        {
+          "pid": 42476,
+          "name": "frps",
+          "cpu_seconds_delta": 2.375,
+          "peak_working_set_mib": 49.50390625,
+          "peak_private_mib": 58.6640625
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c250\\run1\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c250\\run1\\frp\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 70576,
+    "frpc_pid": 115152,
+    "ports": {
+      "control": 54165,
+      "remote": 54166,
+      "echo": 54167
+    },
+    "load": {
+      "concurrency": 250,
+      "requests_per_conn": 200,
+      "total_requests": 50000,
+      "ok_requests": 50000,
+      "errors": 0,
+      "duration_seconds": 5.40194350015372,
+      "requests_per_second": 9255.927981952638,
+      "throughput_mib_per_second": 4.519496084937812,
+      "latency_ms": {
+        "min": 12.324400246143341,
+        "avg": 26.83007575421594,
+        "p50": 17.02400017529726,
+        "p95": 29.105499852448702,
+        "p99": 276.239899918437,
+        "max": 296.74450028687716
+      },
+      "connected": 250,
+      "connect_seconds": 1.2485871999524534,
+      "cpu_seconds_per_1k_requests": 0.1234375
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 6.171875,
+      "peak_working_set_mib": 12.93359375,
+      "peak_private_mib": 8.10546875,
+      "processes": [
+        {
+          "pid": 115152,
+          "name": "frpc",
+          "cpu_seconds_delta": 3.140625,
+          "peak_working_set_mib": 12.93359375,
+          "peak_private_mib": 8.10546875
+        },
+        {
+          "pid": 70576,
+          "name": "frps",
+          "cpu_seconds_delta": 3.03125,
+          "peak_working_set_mib": 12.83203125,
+          "peak_private_mib": 8.0390625
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c250\\run1\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c250\\run1\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp",
+    "frps_pid": 119988,
+    "frpc_pid": 100340,
+    "ports": {
+      "control": 53009,
+      "remote": 53010,
+      "echo": 53011
+    },
+    "load": {
+      "concurrency": 250,
+      "requests_per_conn": 200,
+      "total_requests": 50000,
+      "ok_requests": 50000,
+      "errors": 0,
+      "duration_seconds": 4.630679400172085,
+      "requests_per_second": 10797.551650442894,
+      "throughput_mib_per_second": 5.2722420168178195,
+      "latency_ms": {
+        "min": 11.71599980443716,
+        "avg": 22.94358494080603,
+        "p50": 14.34329990297556,
+        "p95": 20.90850006788969,
+        "p99": 275.16409987583756,
+        "max": 283.29019993543625
+      },
+      "connected": 250,
+      "connect_seconds": 1.2802230999805033,
+      "cpu_seconds_per_1k_requests": 0.10124999999999999
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 5.0625,
+      "peak_working_set_mib": 49.8984375,
+      "peak_private_mib": 60.640625,
+      "processes": [
+        {
+          "pid": 100340,
+          "name": "frpc",
+          "cpu_seconds_delta": 2.703125,
+          "peak_working_set_mib": 49.61328125,
+          "peak_private_mib": 60.640625
+        },
+        {
+          "pid": 119988,
+          "name": "frps",
+          "cpu_seconds_delta": 2.359375,
+          "peak_working_set_mib": 49.8984375,
+          "peak_private_mib": 58.37109375
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c250\\run2\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c250\\run2\\frp\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 94932,
+    "frpc_pid": 105156,
+    "ports": {
+      "control": 56050,
+      "remote": 56051,
+      "echo": 56052
+    },
+    "load": {
+      "concurrency": 250,
+      "requests_per_conn": 200,
+      "total_requests": 50000,
+      "ok_requests": 50000,
+      "errors": 0,
+      "duration_seconds": 5.091879100073129,
+      "requests_per_second": 9819.557577335625,
+      "throughput_mib_per_second": 4.794705848308411,
+      "latency_ms": {
+        "min": 12.06530025228858,
+        "avg": 25.358776912763716,
+        "p50": 14.633700251579285,
+        "p95": 26.74139989539981,
+        "p99": 276.354500092566,
+        "max": 299.681699834764
+      },
+      "connected": 250,
+      "connect_seconds": 1.2786440998315811,
+      "cpu_seconds_per_1k_requests": 0.1040625
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 5.203125,
+      "peak_working_set_mib": 13.05859375,
+      "peak_private_mib": 8.36328125,
+      "processes": [
+        {
+          "pid": 105156,
+          "name": "frpc",
+          "cpu_seconds_delta": 2.5625,
+          "peak_working_set_mib": 13.05859375,
+          "peak_private_mib": 8.36328125
+        },
+        {
+          "pid": 94932,
+          "name": "frps",
+          "cpu_seconds_delta": 2.640625,
+          "peak_working_set_mib": 12.6875,
+          "peak_private_mib": 7.7265625
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c250\\run2\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c250\\run2\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp",
+    "frps_pid": 119992,
+    "frpc_pid": 36956,
+    "ports": {
+      "control": 58403,
+      "remote": 58404,
+      "echo": 58405
+    },
+    "load": {
+      "concurrency": 250,
+      "requests_per_conn": 200,
+      "total_requests": 50000,
+      "ok_requests": 50000,
+      "errors": 0,
+      "duration_seconds": 4.655457000248134,
+      "requests_per_second": 10740.084163023097,
+      "throughput_mib_per_second": 5.244181720226122,
+      "latency_ms": {
+        "min": 11.149699799716473,
+        "avg": 23.209961508298292,
+        "p50": 14.012900181114674,
+        "p95": 24.519700091332197,
+        "p99": 271.21290005743504,
+        "max": 327.56799971684813
+      },
+      "connected": 250,
+      "connect_seconds": 1.2629432999528944,
+      "cpu_seconds_per_1k_requests": 0.1084375
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 5.421875,
+      "peak_working_set_mib": 49.42578125,
+      "peak_private_mib": 59.93359375,
+      "processes": [
+        {
+          "pid": 36956,
+          "name": "frpc",
+          "cpu_seconds_delta": 2.875,
+          "peak_working_set_mib": 49.42578125,
+          "peak_private_mib": 59.93359375
+        },
+        {
+          "pid": 119992,
+          "name": "frps",
+          "cpu_seconds_delta": 2.546875,
+          "peak_working_set_mib": 49.1953125,
+          "peak_private_mib": 59.29296875
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c250\\run3\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c250\\run3\\frp\\logs\\frpc.log"
+    },
+    "run": 3
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 113200,
+    "frpc_pid": 68300,
+    "ports": {
+      "control": 60184,
+      "remote": 60185,
+      "echo": 60186
+    },
+    "load": {
+      "concurrency": 250,
+      "requests_per_conn": 200,
+      "total_requests": 50000,
+      "ok_requests": 50000,
+      "errors": 0,
+      "duration_seconds": 4.6907081999816,
+      "requests_per_second": 10659.371222493894,
+      "throughput_mib_per_second": 5.2047711047333465,
+      "latency_ms": {
+        "min": 10.848700068891048,
+        "avg": 23.327614506734534,
+        "p50": 14.466800261288881,
+        "p95": 24.546599946916103,
+        "p99": 275.5180997774005,
+        "max": 302.03230027109385
+      },
+      "connected": 250,
+      "connect_seconds": 1.2552954000420868,
+      "cpu_seconds_per_1k_requests": 0.124375
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 6.21875,
+      "peak_working_set_mib": 13.58203125,
+      "peak_private_mib": 9.375,
+      "processes": [
+        {
+          "pid": 68300,
+          "name": "frpc",
+          "cpu_seconds_delta": 3.015625,
+          "peak_working_set_mib": 13.58203125,
+          "peak_private_mib": 9.375
+        },
+        {
+          "pid": 113200,
+          "name": "frps",
+          "cpu_seconds_delta": 3.203125,
+          "peak_working_set_mib": 12.7109375,
+          "peak_private_mib": 7.83203125
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c250\\run3\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c100-c250-r3-ramp\\runtime\\c250\\run3\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 3
+  },
+  {
+    "name": "frp",
+    "frps_pid": 120048,
+    "frpc_pid": 115800,
+    "ports": {
+      "control": 62510,
+      "remote": 62511,
+      "echo": 62512
+    },
+    "load": {
+      "concurrency": 300,
+      "requests_per_conn": 200,
+      "total_requests": 60000,
+      "ok_requests": 60000,
+      "errors": 0,
+      "duration_seconds": 5.819308600388467,
+      "requests_per_second": 10310.503209263503,
+      "throughput_mib_per_second": 5.034425395148195,
+      "latency_ms": {
+        "min": 12.907799798995256,
+        "avg": 27.528981848837187,
+        "p50": 17.887800000607967,
+        "p95": 21.55999979004264,
+        "p99": 289.5488999783993,
+        "max": 305.90250017121434
+      },
+      "connected": 300,
+      "connect_seconds": 1.2541149999015033,
+      "cpu_seconds_per_1k_requests": 0.09817708333333333
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 5.890625,
+      "peak_working_set_mib": 55.0390625,
+      "peak_private_mib": 66.2890625,
+      "processes": [
+        {
+          "pid": 115800,
+          "name": "frpc",
+          "cpu_seconds_delta": 3.0625,
+          "peak_working_set_mib": 54.09765625,
+          "peak_private_mib": 66.2890625
+        },
+        {
+          "pid": 120048,
+          "name": "frps",
+          "cpu_seconds_delta": 2.828125,
+          "peak_working_set_mib": 55.0390625,
+          "peak_private_mib": 65.453125
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c300\\run1\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c300\\run1\\frp\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 98204,
+    "frpc_pid": 96756,
+    "ports": {
+      "control": 63882,
+      "remote": 63883,
+      "echo": 63884
+    },
+    "load": {
+      "concurrency": 300,
+      "requests_per_conn": 200,
+      "total_requests": 60000,
+      "ok_requests": 60000,
+      "errors": 0,
+      "duration_seconds": 5.954901299905032,
+      "requests_per_second": 10075.733749097886,
+      "throughput_mib_per_second": 4.919791869676702,
+      "latency_ms": {
+        "min": 16.316300258040428,
+        "avg": 29.61039321773375,
+        "p50": 18.48139986395836,
+        "p95": 23.16749980673194,
+        "p99": 289.69800006598234,
+        "max": 309.23960031941533
+      },
+      "connected": 300,
+      "connect_seconds": 1.273253499995917,
+      "cpu_seconds_per_1k_requests": 0.12161458333333333
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 7.296875,
+      "peak_working_set_mib": 14.3203125,
+      "peak_private_mib": 9.93359375,
+      "processes": [
+        {
+          "pid": 96756,
+          "name": "frpc",
+          "cpu_seconds_delta": 3.6875,
+          "peak_working_set_mib": 14.3203125,
+          "peak_private_mib": 9.93359375
+        },
+        {
+          "pid": 98204,
+          "name": "frps",
+          "cpu_seconds_delta": 3.609375,
+          "peak_working_set_mib": 13.55078125,
+          "peak_private_mib": 8.6640625
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c300\\run1\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c300\\run1\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp",
+    "frps_pid": 96976,
+    "frpc_pid": 77776,
+    "ports": {
+      "control": 65049,
+      "remote": 65050,
+      "echo": 65051
+    },
+    "load": {
+      "concurrency": 300,
+      "requests_per_conn": 200,
+      "total_requests": 60000,
+      "ok_requests": 60000,
+      "errors": 0,
+      "duration_seconds": 5.959727100096643,
+      "requests_per_second": 10067.575073869915,
+      "throughput_mib_per_second": 4.915808141538045,
+      "latency_ms": {
+        "min": 15.478699933737516,
+        "avg": 29.528576236179408,
+        "p50": 18.37169984355569,
+        "p95": 25.493799708783627,
+        "p99": 292.01729968190193,
+        "max": 307.73299979045987
+      },
+      "connected": 300,
+      "connect_seconds": 1.273793799802661,
+      "cpu_seconds_per_1k_requests": 0.10911458333333333
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 6.546875,
+      "peak_working_set_mib": 57.5,
+      "peak_private_mib": 69.359375,
+      "processes": [
+        {
+          "pid": 77776,
+          "name": "frpc",
+          "cpu_seconds_delta": 3.6875,
+          "peak_working_set_mib": 57.5,
+          "peak_private_mib": 69.359375
+        },
+        {
+          "pid": 96976,
+          "name": "frps",
+          "cpu_seconds_delta": 2.859375,
+          "peak_working_set_mib": 56.0546875,
+          "peak_private_mib": 65.2578125
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c300\\run2\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c300\\run2\\frp\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 119516,
+    "frpc_pid": 105532,
+    "ports": {
+      "control": 50355,
+      "remote": 50356,
+      "echo": 50357
+    },
+    "load": {
+      "concurrency": 300,
+      "requests_per_conn": 200,
+      "total_requests": 60000,
+      "ok_requests": 60000,
+      "errors": 0,
+      "duration_seconds": 5.921735200099647,
+      "requests_per_second": 10132.165315158023,
+      "throughput_mib_per_second": 4.9473463452920035,
+      "latency_ms": {
+        "min": 15.771999955177307,
+        "avg": 29.529453984337547,
+        "p50": 18.763499800115824,
+        "p95": 23.316700011491776,
+        "p99": 289.49330002069473,
+        "max": 300.20679999142885
+      },
+      "connected": 300,
+      "connect_seconds": 1.2704774998128414,
+      "cpu_seconds_per_1k_requests": 0.109375
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 6.5625,
+      "peak_working_set_mib": 14.015625,
+      "peak_private_mib": 9.18359375,
+      "processes": [
+        {
+          "pid": 105532,
+          "name": "frpc",
+          "cpu_seconds_delta": 3.34375,
+          "peak_working_set_mib": 14.015625,
+          "peak_private_mib": 9.18359375
+        },
+        {
+          "pid": 119516,
+          "name": "frps",
+          "cpu_seconds_delta": 3.21875,
+          "peak_working_set_mib": 13.578125,
+          "peak_private_mib": 8.6171875
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c300\\run2\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c300\\run2\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp",
+    "frps_pid": 120660,
+    "frpc_pid": 43396,
+    "ports": {
+      "control": 51536,
+      "remote": 51537,
+      "echo": 51538
+    },
+    "load": {
+      "concurrency": 300,
+      "requests_per_conn": 200,
+      "total_requests": 60000,
+      "ok_requests": 60000,
+      "errors": 0,
+      "duration_seconds": 5.86688520014286,
+      "requests_per_second": 10226.89177530506,
+      "throughput_mib_per_second": 4.993599499660673,
+      "latency_ms": {
+        "min": 14.733999967575073,
+        "avg": 29.184887461604863,
+        "p50": 18.31700000911951,
+        "p95": 22.619900293648243,
+        "p99": 294.25189970061183,
+        "max": 302.4407997727394
+      },
+      "connected": 300,
+      "connect_seconds": 1.269838800188154,
+      "cpu_seconds_per_1k_requests": 0.0984375
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 5.90625,
+      "peak_working_set_mib": 55.2890625,
+      "peak_private_mib": 65.91015625,
+      "processes": [
+        {
+          "pid": 43396,
+          "name": "frpc",
+          "cpu_seconds_delta": 3.3125,
+          "peak_working_set_mib": 53.921875,
+          "peak_private_mib": 65.83984375
+        },
+        {
+          "pid": 120660,
+          "name": "frps",
+          "cpu_seconds_delta": 2.59375,
+          "peak_working_set_mib": 55.2890625,
+          "peak_private_mib": 65.91015625
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c300\\run3\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c300\\run3\\frp\\logs\\frpc.log"
+    },
+    "run": 3
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 114156,
+    "frpc_pid": 120568,
+    "ports": {
+      "control": 53115,
+      "remote": 53116,
+      "echo": 53117
+    },
+    "load": {
+      "concurrency": 300,
+      "requests_per_conn": 200,
+      "total_requests": 60000,
+      "ok_requests": 60000,
+      "errors": 0,
+      "duration_seconds": 5.925323100294918,
+      "requests_per_second": 10126.030088893152,
+      "throughput_mib_per_second": 4.94435062934236,
+      "latency_ms": {
+        "min": 12.871699873358011,
+        "avg": 28.11816080607629,
+        "p50": 18.358000088483095,
+        "p95": 22.55950029939413,
+        "p99": 288.7146999128163,
+        "max": 308.09649964794517
+      },
+      "connected": 300,
+      "connect_seconds": 1.2416995000094175,
+      "cpu_seconds_per_1k_requests": 0.10833333333333332
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 6.5,
+      "peak_working_set_mib": 14.34375,
+      "peak_private_mib": 9.984375,
+      "processes": [
+        {
+          "pid": 120568,
+          "name": "frpc",
+          "cpu_seconds_delta": 3.296875,
+          "peak_working_set_mib": 14.34375,
+          "peak_private_mib": 9.984375
+        },
+        {
+          "pid": 114156,
+          "name": "frps",
+          "cpu_seconds_delta": 3.203125,
+          "peak_working_set_mib": 13.609375,
+          "peak_private_mib": 8.7578125
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c300\\run3\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c300\\run3\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 3
+  },
+  {
+    "name": "frp",
+    "frps_pid": 103784,
+    "frpc_pid": 111500,
+    "ports": {
+      "control": 54481,
+      "remote": 54482,
+      "echo": 54483
+    },
+    "load": {
+      "concurrency": 350,
+      "requests_per_conn": 200,
+      "total_requests": 70000,
+      "ok_requests": 70000,
+      "errors": 0,
+      "duration_seconds": 6.95097120013088,
+      "requests_per_second": 10070.535179124605,
+      "throughput_mib_per_second": 4.917253505431936,
+      "latency_ms": {
+        "min": 15.590800438076258,
+        "avg": 34.49728436136751,
+        "p50": 22.09609979763627,
+        "p95": 30.5889998562634,
+        "p99": 293.4654001146555,
+        "max": 316.46980019286275
+      },
+      "connected": 350,
+      "connect_seconds": 1.287574500311166,
+      "cpu_seconds_per_1k_requests": 0.09263392857142858
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 6.484375,
+      "peak_working_set_mib": 60.99609375,
+      "peak_private_mib": 73.29296875,
+      "processes": [
+        {
+          "pid": 111500,
+          "name": "frpc",
+          "cpu_seconds_delta": 3.53125,
+          "peak_working_set_mib": 60.40625,
+          "peak_private_mib": 73.29296875
+        },
+        {
+          "pid": 103784,
+          "name": "frps",
+          "cpu_seconds_delta": 2.953125,
+          "peak_working_set_mib": 60.99609375,
+          "peak_private_mib": 71.9140625
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c350\\run1\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c350\\run1\\frp\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 46548,
+    "frpc_pid": 63228,
+    "ports": {
+      "control": 56253,
+      "remote": 56254,
+      "echo": 56255
+    },
+    "load": {
+      "concurrency": 350,
+      "requests_per_conn": 200,
+      "total_requests": 70000,
+      "ok_requests": 70000,
+      "errors": 0,
+      "duration_seconds": 6.823527799919248,
+      "requests_per_second": 10258.623112934105,
+      "throughput_mib_per_second": 5.009093316862356,
+      "latency_ms": {
+        "min": 0.6130998954176903,
+        "avg": 33.847802573083236,
+        "p50": 21.51770005002618,
+        "p95": 28.779800049960613,
+        "p99": 294.35280011966825,
+        "max": 312.8400999121368
+      },
+      "connected": 350,
+      "connect_seconds": 1.2689006002619863,
+      "cpu_seconds_per_1k_requests": 0.134375
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 9.40625,
+      "peak_working_set_mib": 15.0234375,
+      "peak_private_mib": 10.38671875,
+      "processes": [
+        {
+          "pid": 63228,
+          "name": "frpc",
+          "cpu_seconds_delta": 5.109375,
+          "peak_working_set_mib": 15.0234375,
+          "peak_private_mib": 10.38671875
+        },
+        {
+          "pid": 46548,
+          "name": "frps",
+          "cpu_seconds_delta": 4.296875,
+          "peak_working_set_mib": 14.5078125,
+          "peak_private_mib": 9.546875
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c350\\run1\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c350\\run1\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp",
+    "frps_pid": 120800,
+    "frpc_pid": 39572,
+    "ports": {
+      "control": 57572,
+      "remote": 57573,
+      "echo": 57574
+    },
+    "load": {
+      "concurrency": 350,
+      "requests_per_conn": 200,
+      "total_requests": 70000,
+      "ok_requests": 70000,
+      "errors": 0,
+      "duration_seconds": 6.9920283001847565,
+      "requests_per_second": 10011.401126358474,
+      "throughput_mib_per_second": 4.888379456229724,
+      "latency_ms": {
+        "min": 18.531200010329485,
+        "avg": 34.887943767124256,
+        "p50": 22.36780012026429,
+        "p95": 29.92870006710291,
+        "p99": 308.2749000750482,
+        "max": 315.83329988643527
+      },
+      "connected": 350,
+      "connect_seconds": 1.2900491002947092,
+      "cpu_seconds_per_1k_requests": 0.10625
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 7.4375,
+      "peak_working_set_mib": 62.234375,
+      "peak_private_mib": 77.82421875,
+      "processes": [
+        {
+          "pid": 39572,
+          "name": "frpc",
+          "cpu_seconds_delta": 3.953125,
+          "peak_working_set_mib": 62.234375,
+          "peak_private_mib": 77.82421875
+        },
+        {
+          "pid": 120800,
+          "name": "frps",
+          "cpu_seconds_delta": 3.484375,
+          "peak_working_set_mib": 60.16015625,
+          "peak_private_mib": 71.2109375
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c350\\run2\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c350\\run2\\frp\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 113200,
+    "frpc_pid": 35128,
+    "ports": {
+      "control": 58896,
+      "remote": 58897,
+      "echo": 58898
+    },
+    "load": {
+      "concurrency": 350,
+      "requests_per_conn": 200,
+      "total_requests": 70000,
+      "ok_requests": 70000,
+      "errors": 0,
+      "duration_seconds": 7.022042099852115,
+      "requests_per_second": 9968.610128594104,
+      "throughput_mib_per_second": 4.86748541435259,
+      "latency_ms": {
+        "min": 15.052000060677528,
+        "avg": 34.791909175332904,
+        "p50": 22.257499862462282,
+        "p95": 28.441299684345722,
+        "p99": 302.3729999549687,
+        "max": 313.3779000490904
+      },
+      "connected": 350,
+      "connect_seconds": 1.2759870998561382,
+      "cpu_seconds_per_1k_requests": 0.13303571428571428
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 9.3125,
+      "peak_working_set_mib": 15.4921875,
+      "peak_private_mib": 11.37890625,
+      "processes": [
+        {
+          "pid": 35128,
+          "name": "frpc",
+          "cpu_seconds_delta": 5.046875,
+          "peak_working_set_mib": 15.4921875,
+          "peak_private_mib": 11.37890625
+        },
+        {
+          "pid": 113200,
+          "name": "frps",
+          "cpu_seconds_delta": 4.265625,
+          "peak_working_set_mib": 14.69921875,
+          "peak_private_mib": 9.83203125
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c350\\run2\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c350\\run2\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp",
+    "frps_pid": 110904,
+    "frpc_pid": 120756,
+    "ports": {
+      "control": 63368,
+      "remote": 63370,
+      "echo": 63373
+    },
+    "load": {
+      "concurrency": 350,
+      "requests_per_conn": 200,
+      "total_requests": 70000,
+      "ok_requests": 70000,
+      "errors": 0,
+      "duration_seconds": 7.084741800092161,
+      "requests_per_second": 9880.388301390096,
+      "throughput_mib_per_second": 4.824408350288133,
+      "latency_ms": {
+        "min": 15.908100176602602,
+        "avg": 35.208124274361346,
+        "p50": 22.595500107854605,
+        "p95": 30.26770008727908,
+        "p99": 303.02400002256036,
+        "max": 309.3451000750065
+      },
+      "connected": 350,
+      "connect_seconds": 1.278444499708712,
+      "cpu_seconds_per_1k_requests": 0.11160714285714285
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 7.8125,
+      "peak_working_set_mib": 61.453125,
+      "peak_private_mib": 72.87109375,
+      "processes": [
+        {
+          "pid": 120756,
+          "name": "frpc",
+          "cpu_seconds_delta": 4.171875,
+          "peak_working_set_mib": 59.15234375,
+          "peak_private_mib": 72.87109375
+        },
+        {
+          "pid": 110904,
+          "name": "frps",
+          "cpu_seconds_delta": 3.640625,
+          "peak_working_set_mib": 61.453125,
+          "peak_private_mib": 71.00390625
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c350\\run3\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c350\\run3\\frp\\logs\\frpc.log"
+    },
+    "run": 3
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 111720,
+    "frpc_pid": 106560,
+    "ports": {
+      "control": 50747,
+      "remote": 50749,
+      "echo": 50752
+    },
+    "load": {
+      "concurrency": 350,
+      "requests_per_conn": 200,
+      "total_requests": 70000,
+      "ok_requests": 70000,
+      "errors": 0,
+      "duration_seconds": 6.890901600010693,
+      "requests_per_second": 10158.322388450792,
+      "throughput_mib_per_second": 4.960118353735738,
+      "latency_ms": {
+        "min": 16.033800318837166,
+        "avg": 34.2037645653888,
+        "p50": 21.509900223463774,
+        "p95": 30.50610003992915,
+        "p99": 296.3614999316633,
+        "max": 314.65799966827035
+      },
+      "connected": 350,
+      "connect_seconds": 1.2798443003557622,
+      "cpu_seconds_per_1k_requests": 0.12678571428571428
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 8.875,
+      "peak_working_set_mib": 14.8515625,
+      "peak_private_mib": 10.015625,
+      "processes": [
+        {
+          "pid": 106560,
+          "name": "frpc",
+          "cpu_seconds_delta": 4.9375,
+          "peak_working_set_mib": 14.8515625,
+          "peak_private_mib": 10.015625
+        },
+        {
+          "pid": 111720,
+          "name": "frps",
+          "cpu_seconds_delta": 3.9375,
+          "peak_working_set_mib": 14.5546875,
+          "peak_private_mib": 9.59375
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c350\\run3\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c350\\run3\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 3
+  },
+  {
+    "name": "frp",
+    "frps_pid": 98708,
+    "frpc_pid": 108852,
+    "ports": {
+      "control": 54232,
+      "remote": 54235,
+      "echo": 54238
+    },
+    "load": {
+      "concurrency": 400,
+      "requests_per_conn": 200,
+      "total_requests": 80000,
+      "ok_requests": 80000,
+      "errors": 0,
+      "duration_seconds": 8.376830299850553,
+      "requests_per_second": 9550.1516846327,
+      "throughput_mib_per_second": 4.66316000226206,
+      "latency_ms": {
+        "min": 19.99950036406517,
+        "avg": 41.62613412075443,
+        "p50": 25.95459995791316,
+        "p95": 286.32690012454987,
+        "p99": 308.3805004134774,
+        "max": 320.87229983881116
+      },
+      "connected": 400,
+      "connect_seconds": 1.2903481000103056,
+      "cpu_seconds_per_1k_requests": 0.097265625
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 7.78125,
+      "peak_working_set_mib": 67.12109375,
+      "peak_private_mib": 80.140625,
+      "processes": [
+        {
+          "pid": 108852,
+          "name": "frpc",
+          "cpu_seconds_delta": 3.90625,
+          "peak_working_set_mib": 66.78515625,
+          "peak_private_mib": 80.140625
+        },
+        {
+          "pid": 98708,
+          "name": "frps",
+          "cpu_seconds_delta": 3.875,
+          "peak_working_set_mib": 67.12109375,
+          "peak_private_mib": 79.86328125
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c400\\run1\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c400\\run1\\frp\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 111568,
+    "frpc_pid": 120416,
+    "ports": {
+      "control": 57692,
+      "remote": 57693,
+      "echo": 57694
+    },
+    "load": {
+      "concurrency": 400,
+      "requests_per_conn": 200,
+      "total_requests": 80000,
+      "ok_requests": 80000,
+      "errors": 0,
+      "duration_seconds": 8.44393779989332,
+      "requests_per_second": 9474.252640872215,
+      "throughput_mib_per_second": 4.626099922300886,
+      "latency_ms": {
+        "min": 19.672099966555834,
+        "avg": 41.87209713365301,
+        "p50": 26.479799766093493,
+        "p95": 289.2754003405571,
+        "p99": 306.91100005060434,
+        "max": 317.0830002054572
+      },
+      "connected": 400,
+      "connect_seconds": 1.2743722996674478,
+      "cpu_seconds_per_1k_requests": 0.134375
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 10.75,
+      "peak_working_set_mib": 16.40234375,
+      "peak_private_mib": 12.09765625,
+      "processes": [
+        {
+          "pid": 120416,
+          "name": "frpc",
+          "cpu_seconds_delta": 5.65625,
+          "peak_working_set_mib": 16.40234375,
+          "peak_private_mib": 12.09765625
+        },
+        {
+          "pid": 111568,
+          "name": "frps",
+          "cpu_seconds_delta": 5.09375,
+          "peak_working_set_mib": 15.76953125,
+          "peak_private_mib": 11.078125
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c400\\run1\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c400\\run1\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp",
+    "frps_pid": 111248,
+    "frpc_pid": 111804,
+    "ports": {
+      "control": 59931,
+      "remote": 59932,
+      "echo": 59938
+    },
+    "load": {
+      "concurrency": 400,
+      "requests_per_conn": 200,
+      "total_requests": 80000,
+      "ok_requests": 80000,
+      "errors": 0,
+      "duration_seconds": 8.265361999627203,
+      "requests_per_second": 9678.94691165472,
+      "throughput_mib_per_second": 4.726048296706407,
+      "latency_ms": {
+        "min": 19.93359997868538,
+        "avg": 39.66972409058944,
+        "p50": 25.554700288921595,
+        "p95": 50.30710017308593,
+        "p99": 310.4143999516964,
+        "max": 318.7440000474453
+      },
+      "connected": 400,
+      "connect_seconds": 1.2847556001506746,
+      "cpu_seconds_per_1k_requests": 0.11171875
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 8.9375,
+      "peak_working_set_mib": 67.203125,
+      "peak_private_mib": 80.23046875,
+      "processes": [
+        {
+          "pid": 111804,
+          "name": "frpc",
+          "cpu_seconds_delta": 4.8125,
+          "peak_working_set_mib": 67.203125,
+          "peak_private_mib": 80.23046875
+        },
+        {
+          "pid": 111248,
+          "name": "frps",
+          "cpu_seconds_delta": 4.125,
+          "peak_working_set_mib": 65.66015625,
+          "peak_private_mib": 77.2109375
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c400\\run2\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c400\\run2\\frp\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 115456,
+    "frpc_pid": 111736,
+    "ports": {
+      "control": 61582,
+      "remote": 61583,
+      "echo": 61584
+    },
+    "load": {
+      "concurrency": 400,
+      "requests_per_conn": 200,
+      "total_requests": 80000,
+      "ok_requests": 80000,
+      "errors": 0,
+      "duration_seconds": 8.056811499875039,
+      "requests_per_second": 9929.486373268233,
+      "throughput_mib_per_second": 4.84838201819738,
+      "latency_ms": {
+        "min": 18.724599853157997,
+        "avg": 39.90023963021231,
+        "p50": 25.65379999577999,
+        "p95": 63.074199948459864,
+        "p99": 313.18000005558133,
+        "max": 318.60220013186336
+      },
+      "connected": 400,
+      "connect_seconds": 1.3003589999862015,
+      "cpu_seconds_per_1k_requests": 0.134375
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 10.75,
+      "peak_working_set_mib": 16.62890625,
+      "peak_private_mib": 12.5078125,
+      "processes": [
+        {
+          "pid": 111736,
+          "name": "frpc",
+          "cpu_seconds_delta": 6.28125,
+          "peak_working_set_mib": 16.62890625,
+          "peak_private_mib": 12.5078125
+        },
+        {
+          "pid": 115456,
+          "name": "frps",
+          "cpu_seconds_delta": 4.46875,
+          "peak_working_set_mib": 15.61328125,
+          "peak_private_mib": 10.78515625
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c400\\run2\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c400\\run2\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp",
+    "frps_pid": 119820,
+    "frpc_pid": 111484,
+    "ports": {
+      "control": 49996,
+      "remote": 49997,
+      "echo": 49998
+    },
+    "load": {
+      "concurrency": 400,
+      "requests_per_conn": 200,
+      "total_requests": 80000,
+      "ok_requests": 80000,
+      "errors": 0,
+      "duration_seconds": 8.927564300131053,
+      "requests_per_second": 8961.01078754769,
+      "throughput_mib_per_second": 4.37549354860727,
+      "latency_ms": {
+        "min": 7.397299632430077,
+        "avg": 44.35124381153728,
+        "p50": 25.678500067442656,
+        "p95": 90.8064004033804,
+        "p99": 314.53080009669065,
+        "max": 1237.6787001267076
+      },
+      "connected": 400,
+      "connect_seconds": 1.2691321996971965,
+      "cpu_seconds_per_1k_requests": 0.10957031249999999
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 8.765625,
+      "peak_working_set_mib": 65.99609375,
+      "peak_private_mib": 79.59375,
+      "processes": [
+        {
+          "pid": 111484,
+          "name": "frpc",
+          "cpu_seconds_delta": 4.75,
+          "peak_working_set_mib": 64.87890625,
+          "peak_private_mib": 79.59375
+        },
+        {
+          "pid": 119820,
+          "name": "frps",
+          "cpu_seconds_delta": 4.015625,
+          "peak_working_set_mib": 65.99609375,
+          "peak_private_mib": 78.25390625
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c400\\run3\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c400\\run3\\frp\\logs\\frpc.log"
+    },
+    "run": 3
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 73720,
+    "frpc_pid": 19328,
+    "ports": {
+      "control": 60230,
+      "remote": 60231,
+      "echo": 60232
+    },
+    "load": {
+      "concurrency": 400,
+      "requests_per_conn": 200,
+      "total_requests": 80000,
+      "ok_requests": 80000,
+      "errors": 0,
+      "duration_seconds": 8.007932899985462,
+      "requests_per_second": 9990.093698230818,
+      "throughput_mib_per_second": 4.877975438589266,
+      "latency_ms": {
+        "min": 19.52569978311658,
+        "avg": 39.57906270129024,
+        "p50": 25.546000339090824,
+        "p95": 69.26470017060637,
+        "p99": 301.77100002765656,
+        "max": 326.34419994428754
+      },
+      "connected": 400,
+      "connect_seconds": 1.2773729003965855,
+      "cpu_seconds_per_1k_requests": 0.13671875
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 10.9375,
+      "peak_working_set_mib": 16.765625,
+      "peak_private_mib": 12.6875,
+      "processes": [
+        {
+          "pid": 19328,
+          "name": "frpc",
+          "cpu_seconds_delta": 6.140625,
+          "peak_working_set_mib": 16.765625,
+          "peak_private_mib": 12.6875
+        },
+        {
+          "pid": 73720,
+          "name": "frps",
+          "cpu_seconds_delta": 4.796875,
+          "peak_working_set_mib": 15.59375,
+          "peak_private_mib": 10.63671875
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c400\\run3\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c400\\run3\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 3
+  },
+  {
+    "name": "frp",
+    "frps_pid": 8596,
+    "frpc_pid": 24748,
+    "ports": {
+      "control": 63403,
+      "remote": 63404,
+      "echo": 63405
+    },
+    "load": {
+      "concurrency": 450,
+      "requests_per_conn": 200,
+      "total_requests": 90000,
+      "ok_requests": 90000,
+      "errors": 0,
+      "duration_seconds": 9.383142599835992,
+      "requests_per_second": 9591.669213422496,
+      "throughput_mib_per_second": 4.683432233116453,
+      "latency_ms": {
+        "min": 25.778100360184908,
+        "avg": 46.35624891900871,
+        "p50": 29.592799954116344,
+        "p95": 294.19320030137897,
+        "p99": 317.8170002065599,
+        "max": 327.8558002784848
+      },
+      "connected": 450,
+      "connect_seconds": 1.2871322999708354,
+      "cpu_seconds_per_1k_requests": 0.12760416666666666
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 11.484375,
+      "peak_working_set_mib": 74.0234375,
+      "peak_private_mib": 92.31640625,
+      "processes": [
+        {
+          "pid": 24748,
+          "name": "frpc",
+          "cpu_seconds_delta": 6.328125,
+          "peak_working_set_mib": 74.0234375,
+          "peak_private_mib": 92.31640625
+        },
+        {
+          "pid": 8596,
+          "name": "frps",
+          "cpu_seconds_delta": 5.15625,
+          "peak_working_set_mib": 70.2109375,
+          "peak_private_mib": 83.8046875
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c450\\run1\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c450\\run1\\frp\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 114408,
+    "frpc_pid": 120388,
+    "ports": {
+      "control": 49201,
+      "remote": 49202,
+      "echo": 49203
+    },
+    "load": {
+      "concurrency": 450,
+      "requests_per_conn": 200,
+      "total_requests": 90000,
+      "ok_requests": 90000,
+      "errors": 0,
+      "duration_seconds": 9.40533349988982,
+      "requests_per_second": 9569.038673754027,
+      "throughput_mib_per_second": 4.672382164918958,
+      "latency_ms": {
+        "min": 20.785299595445395,
+        "avg": 46.55352923747463,
+        "p50": 29.559600166976452,
+        "p95": 297.970799729228,
+        "p99": 314.5352001301944,
+        "max": 335.40229965001345
+      },
+      "connected": 450,
+      "connect_seconds": 1.28790820017457,
+      "cpu_seconds_per_1k_requests": 0.1171875
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 10.546875,
+      "peak_working_set_mib": 17.8359375,
+      "peak_private_mib": 13.96875,
+      "processes": [
+        {
+          "pid": 120388,
+          "name": "frpc",
+          "cpu_seconds_delta": 5.65625,
+          "peak_working_set_mib": 17.8359375,
+          "peak_private_mib": 13.96875
+        },
+        {
+          "pid": 114408,
+          "name": "frps",
+          "cpu_seconds_delta": 4.890625,
+          "peak_working_set_mib": 16.60546875,
+          "peak_private_mib": 11.734375
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c450\\run1\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c450\\run1\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp",
+    "frps_pid": 44100,
+    "frpc_pid": 66280,
+    "ports": {
+      "control": 51845,
+      "remote": 51846,
+      "echo": 51847
+    },
+    "load": {
+      "concurrency": 450,
+      "requests_per_conn": 200,
+      "total_requests": 90000,
+      "ok_requests": 90000,
+      "errors": 0,
+      "duration_seconds": 9.52197500038892,
+      "requests_per_second": 9451.82065656799,
+      "throughput_mib_per_second": 4.615146804964839,
+      "latency_ms": {
+        "min": 6.022700108587742,
+        "avg": 47.259564086318846,
+        "p50": 29.962600208818913,
+        "p95": 291.53780033811927,
+        "p99": 317.67719984054565,
+        "max": 330.79809974879026
+      },
+      "connected": 450,
+      "connect_seconds": 1.292973699979484,
+      "cpu_seconds_per_1k_requests": 0.10034722222222223
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 9.03125,
+      "peak_working_set_mib": 70.4375,
+      "peak_private_mib": 86.75390625,
+      "processes": [
+        {
+          "pid": 66280,
+          "name": "frpc",
+          "cpu_seconds_delta": 4.578125,
+          "peak_working_set_mib": 70.1953125,
+          "peak_private_mib": 86.75390625
+        },
+        {
+          "pid": 44100,
+          "name": "frps",
+          "cpu_seconds_delta": 4.453125,
+          "peak_working_set_mib": 70.4375,
+          "peak_private_mib": 83.6328125
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c450\\run2\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c450\\run2\\frp\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 38216,
+    "frpc_pid": 75316,
+    "ports": {
+      "control": 55196,
+      "remote": 55197,
+      "echo": 55199
+    },
+    "load": {
+      "concurrency": 450,
+      "requests_per_conn": 200,
+      "total_requests": 90000,
+      "ok_requests": 90000,
+      "errors": 0,
+      "duration_seconds": 9.361012999899685,
+      "requests_per_second": 9614.344088718226,
+      "throughput_mib_per_second": 4.694503949569446,
+      "latency_ms": {
+        "min": 19.26460023969412,
+        "avg": 46.43658593797849,
+        "p50": 29.507500119507313,
+        "p95": 294.31959986686707,
+        "p99": 315.4017999768257,
+        "max": 325.14500012621284
+      },
+      "connected": 450,
+      "connect_seconds": 1.2782133999280632,
+      "cpu_seconds_per_1k_requests": 0.1295138888888889
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 11.65625,
+      "peak_working_set_mib": 17.08984375,
+      "peak_private_mib": 12.57421875,
+      "processes": [
+        {
+          "pid": 75316,
+          "name": "frpc",
+          "cpu_seconds_delta": 6.515625,
+          "peak_working_set_mib": 17.08984375,
+          "peak_private_mib": 12.57421875
+        },
+        {
+          "pid": 38216,
+          "name": "frps",
+          "cpu_seconds_delta": 5.140625,
+          "peak_working_set_mib": 16.56640625,
+          "peak_private_mib": 11.6484375
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c450\\run2\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c450\\run2\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp",
+    "frps_pid": 102216,
+    "frpc_pid": 106388,
+    "ports": {
+      "control": 63952,
+      "remote": 63957,
+      "echo": 63960
+    },
+    "load": {
+      "concurrency": 450,
+      "requests_per_conn": 200,
+      "total_requests": 90000,
+      "ok_requests": 90000,
+      "errors": 0,
+      "duration_seconds": 9.68147649988532,
+      "requests_per_second": 9296.10271750038,
+      "throughput_mib_per_second": 4.5391126550294825,
+      "latency_ms": {
+        "min": 14.241000171750784,
+        "avg": 47.84985562131947,
+        "p50": 30.421399977058172,
+        "p95": 300.19279988482594,
+        "p99": 330.388099886477,
+        "max": 344.5766996592283
+      },
+      "connected": 450,
+      "connect_seconds": 1.2768799001350999,
+      "cpu_seconds_per_1k_requests": 0.11875
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 10.6875,
+      "peak_working_set_mib": 77.2109375,
+      "peak_private_mib": 95.44921875,
+      "processes": [
+        {
+          "pid": 106388,
+          "name": "frpc",
+          "cpu_seconds_delta": 5.671875,
+          "peak_working_set_mib": 77.2109375,
+          "peak_private_mib": 95.44921875
+        },
+        {
+          "pid": 102216,
+          "name": "frps",
+          "cpu_seconds_delta": 5.015625,
+          "peak_working_set_mib": 71.4140625,
+          "peak_private_mib": 84.0234375
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c450\\run3\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c450\\run3\\frp\\logs\\frpc.log"
+    },
+    "run": 3
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 100772,
+    "frpc_pid": 33132,
+    "ports": {
+      "control": 51297,
+      "remote": 51298,
+      "echo": 51299
+    },
+    "load": {
+      "concurrency": 450,
+      "requests_per_conn": 200,
+      "total_requests": 90000,
+      "ok_requests": 90000,
+      "errors": 0,
+      "duration_seconds": 9.35968460002914,
+      "requests_per_second": 9615.708631861355,
+      "throughput_mib_per_second": 4.695170230401052,
+      "latency_ms": {
+        "min": 22.175900172442198,
+        "avg": 46.50402762764651,
+        "p50": 29.376099817454815,
+        "p95": 296.08430014923215,
+        "p99": 308.8543997146189,
+        "max": 325.2902999520302
+      },
+      "connected": 450,
+      "connect_seconds": 1.300573400221765,
+      "cpu_seconds_per_1k_requests": 0.12482638888888889
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 11.234375,
+      "peak_working_set_mib": 17.75390625,
+      "peak_private_mib": 13.859375,
+      "processes": [
+        {
+          "pid": 33132,
+          "name": "frpc",
+          "cpu_seconds_delta": 6.015625,
+          "peak_working_set_mib": 17.75390625,
+          "peak_private_mib": 13.859375
+        },
+        {
+          "pid": 100772,
+          "name": "frps",
+          "cpu_seconds_delta": 5.21875,
+          "peak_working_set_mib": 16.828125,
+          "peak_private_mib": 12.25
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c450\\run3\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c450\\run3\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 3
+  },
+  {
+    "name": "frp",
+    "frps_pid": 118648,
+    "frpc_pid": 36344,
+    "ports": {
+      "control": 55020,
+      "remote": 55023,
+      "echo": 55024
+    },
+    "load": {
+      "concurrency": 500,
+      "requests_per_conn": 200,
+      "total_requests": 100000,
+      "ok_requests": 100000,
+      "errors": 0,
+      "duration_seconds": 10.840050400234759,
+      "requests_per_second": 9225.04935934932,
+      "throughput_mib_per_second": 4.504418632494785,
+      "latency_ms": {
+        "min": 3.07160010561347,
+        "avg": 52.44049804956652,
+        "p50": 33.86109974235296,
+        "p95": 300.60660000890493,
+        "p99": 337.6242001540959,
+        "max": 397.9739001952112
+      },
+      "connected": 500,
+      "connect_seconds": 1.284803600050509,
+      "cpu_seconds_per_1k_requests": 0.10265625
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 10.265625,
+      "peak_working_set_mib": 82.99609375,
+      "peak_private_mib": 100.12109375,
+      "processes": [
+        {
+          "pid": 36344,
+          "name": "frpc",
+          "cpu_seconds_delta": 5.75,
+          "peak_working_set_mib": 82.99609375,
+          "peak_private_mib": 100.12109375
+        },
+        {
+          "pid": 118648,
+          "name": "frps",
+          "cpu_seconds_delta": 4.515625,
+          "peak_working_set_mib": 76.6640625,
+          "peak_private_mib": 91.40234375
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c500\\run1\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c500\\run1\\frp\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 111240,
+    "frpc_pid": 55540,
+    "ports": {
+      "control": 58250,
+      "remote": 58251,
+      "echo": 58252
+    },
+    "load": {
+      "concurrency": 500,
+      "requests_per_conn": 200,
+      "total_requests": 100000,
+      "ok_requests": 100000,
+      "errors": 0,
+      "duration_seconds": 10.723567700013518,
+      "requests_per_second": 9325.254691111237,
+      "throughput_mib_per_second": 4.553347017144159,
+      "latency_ms": {
+        "min": 19.951900001615286,
+        "avg": 53.321491861422544,
+        "p50": 33.64450018852949,
+        "p95": 303.2219000160694,
+        "p99": 321.2808002717793,
+        "max": 330.2555996924639
+      },
+      "connected": 500,
+      "connect_seconds": 1.3130466002039611,
+      "cpu_seconds_per_1k_requests": 0.136875
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 13.6875,
+      "peak_working_set_mib": 18.59765625,
+      "peak_private_mib": 14.66015625,
+      "processes": [
+        {
+          "pid": 55540,
+          "name": "frpc",
+          "cpu_seconds_delta": 7.8125,
+          "peak_working_set_mib": 18.59765625,
+          "peak_private_mib": 14.66015625
+        },
+        {
+          "pid": 111240,
+          "name": "frps",
+          "cpu_seconds_delta": 5.875,
+          "peak_working_set_mib": 17.7890625,
+          "peak_private_mib": 13.17578125
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c500\\run1\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c500\\run1\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 1
+  },
+  {
+    "name": "frp",
+    "frps_pid": 116924,
+    "frpc_pid": 63340,
+    "ports": {
+      "control": 60168,
+      "remote": 60169,
+      "echo": 60170
+    },
+    "load": {
+      "concurrency": 500,
+      "requests_per_conn": 200,
+      "total_requests": 100000,
+      "ok_requests": 100000,
+      "errors": 0,
+      "duration_seconds": 10.887787700165063,
+      "requests_per_second": 9184.602304330747,
+      "throughput_mib_per_second": 4.4846690939114975,
+      "latency_ms": {
+        "min": 24.293099995702505,
+        "avg": 54.319020083043725,
+        "p50": 34.22539960592985,
+        "p95": 305.89899979531765,
+        "p99": 334.1955002397299,
+        "max": 414.16529985144734
+      },
+      "connected": 500,
+      "connect_seconds": 1.3015236002393067,
+      "cpu_seconds_per_1k_requests": 0.11453125
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 11.453125,
+      "peak_working_set_mib": 83.3125,
+      "peak_private_mib": 105.38671875,
+      "processes": [
+        {
+          "pid": 63340,
+          "name": "frpc",
+          "cpu_seconds_delta": 6.234375,
+          "peak_working_set_mib": 83.3125,
+          "peak_private_mib": 105.38671875
+        },
+        {
+          "pid": 116924,
+          "name": "frps",
+          "cpu_seconds_delta": 5.21875,
+          "peak_working_set_mib": 75.84375,
+          "peak_private_mib": 90.30078125
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c500\\run2\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c500\\run2\\frp\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 115088,
+    "frpc_pid": 66864,
+    "ports": {
+      "control": 62172,
+      "remote": 62173,
+      "echo": 62174
+    },
+    "load": {
+      "concurrency": 500,
+      "requests_per_conn": 200,
+      "total_requests": 100000,
+      "ok_requests": 100000,
+      "errors": 0,
+      "duration_seconds": 10.911828799638897,
+      "requests_per_second": 9164.366655322641,
+      "throughput_mib_per_second": 4.474788405919258,
+      "latency_ms": {
+        "min": 21.48619992658496,
+        "avg": 54.06837399795186,
+        "p50": 33.66030007600784,
+        "p95": 302.065999712795,
+        "p99": 324.4720003567636,
+        "max": 337.444799952209
+      },
+      "connected": 500,
+      "connect_seconds": 1.2923351000063121,
+      "cpu_seconds_per_1k_requests": 0.13140625
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 13.140625,
+      "peak_working_set_mib": 18.7265625,
+      "peak_private_mib": 14.91015625,
+      "processes": [
+        {
+          "pid": 66864,
+          "name": "frpc",
+          "cpu_seconds_delta": 7.59375,
+          "peak_working_set_mib": 18.7265625,
+          "peak_private_mib": 14.91015625
+        },
+        {
+          "pid": 115088,
+          "name": "frps",
+          "cpu_seconds_delta": 5.546875,
+          "peak_working_set_mib": 17.51953125,
+          "peak_private_mib": 12.68359375
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c500\\run2\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c500\\run2\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 2
+  },
+  {
+    "name": "frp",
+    "frps_pid": 115844,
+    "frpc_pid": 120616,
+    "ports": {
+      "control": 65135,
+      "remote": 65136,
+      "echo": 65139
+    },
+    "load": {
+      "concurrency": 500,
+      "requests_per_conn": 200,
+      "total_requests": 100000,
+      "ok_requests": 100000,
+      "errors": 0,
+      "duration_seconds": 10.89204220008105,
+      "requests_per_second": 9181.014741134208,
+      "throughput_mib_per_second": 4.482917354069437,
+      "latency_ms": {
+        "min": 29.696000274270773,
+        "avg": 54.12048928326462,
+        "p50": 33.964100293815136,
+        "p95": 308.46699979156256,
+        "p99": 325.6100998260081,
+        "max": 338.17039988934994
+      },
+      "connected": 500,
+      "connect_seconds": 1.2873138999566436,
+      "cpu_seconds_per_1k_requests": 0.1146875
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 11.46875,
+      "peak_working_set_mib": 78.5859375,
+      "peak_private_mib": 94.88671875,
+      "processes": [
+        {
+          "pid": 120616,
+          "name": "frpc",
+          "cpu_seconds_delta": 6.71875,
+          "peak_working_set_mib": 76.87890625,
+          "peak_private_mib": 94.88671875
+        },
+        {
+          "pid": 115844,
+          "name": "frps",
+          "cpu_seconds_delta": 4.75,
+          "peak_working_set_mib": 78.5859375,
+          "peak_private_mib": 93.01171875
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c500\\run3\\frp\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c500\\run3\\frp\\logs\\frpc.log"
+    },
+    "run": 3
+  },
+  {
+    "name": "frp-rs",
+    "frps_pid": 106476,
+    "frpc_pid": 120368,
+    "ports": {
+      "control": 57567,
+      "remote": 57570,
+      "echo": 57576
+    },
+    "load": {
+      "concurrency": 500,
+      "requests_per_conn": 200,
+      "total_requests": 100000,
+      "ok_requests": 100000,
+      "errors": 0,
+      "duration_seconds": 10.440842499956489,
+      "requests_per_second": 9577.771142550684,
+      "throughput_mib_per_second": 4.676646065698576,
+      "latency_ms": {
+        "min": 0.10449998080730438,
+        "avg": 51.788659216049126,
+        "p50": 33.22299988940358,
+        "p95": 301.3879000209272,
+        "p99": 321.9941002316773,
+        "max": 590.4049002565444
+      },
+      "connected": 500,
+      "connect_seconds": 1.2607416003011167,
+      "cpu_seconds_per_1k_requests": 0.1321875
+    },
+    "processes": {
+      "total_cpu_seconds_delta": 13.21875,
+      "peak_working_set_mib": 17.96875,
+      "peak_private_mib": 13.265625,
+      "processes": [
+        {
+          "pid": 120368,
+          "name": "frpc",
+          "cpu_seconds_delta": 7.9375,
+          "peak_working_set_mib": 17.96875,
+          "peak_private_mib": 13.265625
+        },
+        {
+          "pid": 106476,
+          "name": "frps",
+          "cpu_seconds_delta": 5.28125,
+          "peak_working_set_mib": 17.53515625,
+          "peak_private_mib": 12.69140625
+        }
+      ]
+    },
+    "logs": {
+      "frps": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c500\\run3\\frp-rs\\logs\\frps.log",
+      "frpc": "D:\\workspaces\\study\\codex\\rust\\frp-rs\\bench\\results\\optimized-matrix-post-nodelay-c300-c500-r3-ramp\\runtime\\c500\\run3\\frp-rs\\logs\\frpc.log"
+    },
+    "run": 3
+  }
+]

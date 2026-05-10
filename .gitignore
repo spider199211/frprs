@@ -1,6 +1,14 @@
 /target/
 /dist/
 /tools/
+/bench/tools/
+/bench/**/runtime/
+/bench/results/**
+!/bench/results/
+!/bench/results/summary.md
+!/bench/results/summary.json
+!/bench/results/all_results.json
+__pycache__/
 
 *.pdb
 *.log

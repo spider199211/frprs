@@ -50,7 +50,9 @@ pub enum Message {
         run_id: String,
         token: Option<String>,
     },
-    ReqWorkConn,
+    ReqWorkConn {
+        count: usize,
+    },
     StartWorkConn {
         proxy_name: String,
         src_addr: String,
@@ -131,11 +133,11 @@ mod tests {
     #[tokio::test]
     async fn message_round_trips() {
         let (mut client, mut server) = duplex(1024);
-        let sent = Message::ReqWorkConn;
+        let sent = Message::ReqWorkConn { count: 3 };
 
         write_msg(&mut client, &sent).await.unwrap();
         let got = read_msg(&mut server).await.unwrap();
 
-        assert!(matches!(got, Message::ReqWorkConn));
+        assert!(matches!(got, Message::ReqWorkConn { count: 3 }));
     }
 }

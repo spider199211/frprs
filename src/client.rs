@@ -148,14 +148,7 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
         });
     }
 
-    for _ in 0..state.cfg.pool_count {
-        let pool_state = state.clone();
-        tokio::spawn(async move {
-            if let Err(err) = open_work_conn(pool_state).await {
-                debug!("pooled work connection ended: {err:#}");
-            }
-        });
-    }
+    spawn_work_conns(state.clone(), state.cfg.pool_count, "pooled");
 
     let ping_state = state.clone();
     tokio::spawn(async move {
@@ -187,13 +180,8 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
             } => {
                 error!("proxy {proxy_name} failed: {error}");
             }
-            Message::ReqWorkConn => {
-                let state = state.clone();
-                tokio::spawn(async move {
-                    if let Err(err) = open_work_conn(state).await {
-                        warn!("work connection failed: {err:#}");
-                    }
-                });
+            Message::ReqWorkConn { count } => {
+                spawn_work_conns(state.clone(), count, "requested");
             }
             Message::UdpPacket {
                 proxy_name,
@@ -222,6 +210,17 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
     }
 }
 
+fn spawn_work_conns(state: ClientState, count: usize, label: &'static str) {
+    for _ in 0..count {
+        let state = state.clone();
+        tokio::spawn(async move {
+            if let Err(err) = open_work_conn(state).await {
+                warn!("{label} work connection failed: {err:#}");
+            }
+        });
+    }
+}
+
 async fn register_proxy(state: &ClientState, proxy: &ProxyConfig) -> Result<()> {
     state
         .send(&Message::NewProxy {
@@ -242,6 +241,7 @@ async fn connect_control(cfg: &ClientConfig) -> Result<BoxStream> {
             let stream = TcpStream::connect(&server_addr)
                 .await
                 .with_context(|| format!("connect tcp frps at {server_addr}"))?;
+            configure_tcp_stream(&stream);
             Ok(Box::new(stream))
         }
         TransportProtocol::Kcp => {
@@ -312,6 +312,7 @@ async fn run_visitor_listener(state: ClientState, visitor: VisitorConfig) -> Res
             .accept()
             .await
             .with_context(|| format!("accept visitor {}", visitor.name))?;
+        configure_tcp_stream(&inbound);
         let state = state.clone();
         let visitor = visitor.clone();
         tokio::spawn(async move {
@@ -448,11 +449,18 @@ async fn open_work_conn(state: ClientState) -> Result<()> {
     let mut local = TcpStream::connect(&local_addr)
         .await
         .with_context(|| format!("connect local service for proxy {proxy_name} at {local_addr}"))?;
+    configure_tcp_stream(&local);
 
     io::copy_bidirectional(&mut stream, &mut local)
         .await
         .with_context(|| format!("copy bytes for proxy {proxy_name}"))?;
     Ok(())
+}
+
+fn configure_tcp_stream(stream: &TcpStream) {
+    if let Err(err) = stream.set_nodelay(true) {
+        debug!("set TCP_NODELAY failed: {err:#}");
+    }
 }
 
 async fn handle_udp_packet(

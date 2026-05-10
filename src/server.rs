@@ -7,18 +7,18 @@ use crate::{
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::json;
 use std::{
-    collections::HashMap,
-    net::SocketAddr,
+    collections::{HashMap, VecDeque},
+    net::{SocketAddr, ToSocketAddrs},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf},
-    net::{TcpListener, TcpStream, UdpSocket},
-    sync::{mpsc, Mutex},
+    io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf},
+    net::{TcpListener, TcpSocket, TcpStream, UdpSocket},
+    sync::{Mutex, Notify},
     task::JoinHandle,
     time,
 };
@@ -42,8 +42,15 @@ struct Control {
     run_id: String,
     pool_count: usize,
     writer: Mutex<WriteHalf<BoxStream>>,
-    work_tx: mpsc::Sender<BoxStream>,
-    work_rx: Mutex<mpsc::Receiver<BoxStream>>,
+    work_pool: WorkPool,
+}
+
+struct WorkPool {
+    queue: Mutex<VecDeque<BoxStream>>,
+    notify: Notify,
+    queued: AtomicUsize,
+    pending: AtomicUsize,
+    waiters: AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -81,6 +88,68 @@ impl Control {
     async fn send(&self, msg: &Message) -> Result<()> {
         let mut writer = self.writer.lock().await;
         write_msg(&mut *writer, msg).await
+    }
+}
+
+impl WorkPool {
+    fn new() -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::new()),
+            notify: Notify::new(),
+            queued: AtomicUsize::new(0),
+            pending: AtomicUsize::new(0),
+            waiters: AtomicUsize::new(0),
+        }
+    }
+
+    async fn push(&self, stream: BoxStream) {
+        {
+            let mut queue = self.queue.lock().await;
+            queue.push_back(stream);
+        }
+        self.queued.fetch_add(1, Ordering::Release);
+        let _ = self
+            .pending
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                Some(value.saturating_sub(1))
+            });
+        self.notify.notify_one();
+    }
+
+    async fn pop(&self) -> Option<BoxStream> {
+        let mut queue = self.queue.lock().await;
+        let stream = queue.pop_front();
+        if stream.is_some() {
+            self.queued.fetch_sub(1, Ordering::AcqRel);
+        }
+        stream
+    }
+
+    fn reserve_missing(&self, target: usize) -> usize {
+        let available = self.available();
+        if available >= target {
+            return 0;
+        }
+        let missing = target - available;
+        self.pending.fetch_add(missing, Ordering::AcqRel);
+        missing
+    }
+
+    fn available(&self) -> usize {
+        self.queued
+            .load(Ordering::Acquire)
+            .saturating_add(self.pending.load(Ordering::Acquire))
+    }
+
+    fn release_reserved(&self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let _ = self
+            .pending
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                Some(value.saturating_sub(count))
+            });
     }
 }
 
@@ -139,7 +208,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
 }
 
 async fn run_tcp_control_listener(state: ServerState) -> Result<()> {
-    let listener = TcpListener::bind(state.cfg.control_addr())
+    let listener = bind_tcp_listener(&state.cfg.control_addr())
         .await
         .with_context(|| format!("listen frps control on {}", state.cfg.control_addr()))?;
     let addr = listener
@@ -149,12 +218,41 @@ async fn run_tcp_control_listener(state: ServerState) -> Result<()> {
 
     loop {
         let (stream, peer) = listener.accept().await.context("accept frps connection")?;
+        configure_tcp_stream(&stream);
         let state = state.clone();
         tokio::spawn(async move {
             if let Err(err) = handle_connection(state, Box::new(stream), peer).await {
                 debug!("connection {peer} closed: {err:#}");
             }
         });
+    }
+}
+
+async fn bind_tcp_listener(addr: &str) -> Result<TcpListener> {
+    let socket_addr = addr
+        .to_socket_addrs()
+        .with_context(|| format!("resolve listen address {addr}"))?
+        .next()
+        .ok_or_else(|| anyhow!("listen address {addr} did not resolve"))?;
+    let socket = if socket_addr.is_ipv6() {
+        TcpSocket::new_v6().context("create ipv6 tcp socket")?
+    } else {
+        TcpSocket::new_v4().context("create ipv4 tcp socket")?
+    };
+    socket
+        .set_reuseaddr(true)
+        .context("set tcp listener reuseaddr")?;
+    socket
+        .bind(socket_addr)
+        .with_context(|| format!("bind tcp listener on {socket_addr}"))?;
+    socket
+        .listen(4096)
+        .with_context(|| format!("listen tcp on {socket_addr}"))
+}
+
+fn configure_tcp_stream(stream: &TcpStream) {
+    if let Err(err) = stream.set_nodelay(true) {
+        debug!("set TCP_NODELAY failed: {err:#}");
     }
 }
 
@@ -263,13 +361,11 @@ async fn register_control(
     peer: SocketAddr,
 ) -> Result<()> {
     let (mut reader, writer) = tokio::io::split(stream);
-    let (work_tx, work_rx) = mpsc::channel(256);
     let control = Arc::new(Control {
         run_id: run_id.clone(),
         pool_count,
         writer: Mutex::new(writer),
-        work_tx,
-        work_rx: Mutex::new(work_rx),
+        work_pool: WorkPool::new(),
     });
 
     {
@@ -385,11 +481,7 @@ async fn register_work_conn(state: ServerState, run_id: String, stream: BoxStrea
     }
     .ok_or_else(|| anyhow!("no active control for run_id {run_id}"))?;
 
-    control
-        .work_tx
-        .send(stream)
-        .await
-        .map_err(|_| anyhow!("control {run_id} is no longer accepting work connections"))?;
+    control.work_pool.push(stream).await;
     Ok(())
 }
 
@@ -569,7 +661,7 @@ async fn start_tcp_proxy(
     bandwidth_limit: Option<u64>,
 ) -> Result<String> {
     let bind_addr = format!("{}:{}", state.cfg.proxy_bind_addr, remote_port);
-    let listener = TcpListener::bind(&bind_addr)
+    let listener = bind_tcp_listener(&bind_addr)
         .await
         .with_context(|| format!("listen tcp proxy {proxy_name} on {bind_addr}"))?;
     let remote_addr = listener
@@ -585,6 +677,7 @@ async fn start_tcp_proxy(
         loop {
             match listener.accept().await {
                 Ok((visitor, visitor_addr)) => {
+                    configure_tcp_stream(&visitor);
                     let control = control.clone();
                     let proxy_name = task_proxy_name.clone();
                     let metrics = metrics.clone();
@@ -907,7 +1000,7 @@ async fn bridge_stcp_visitor(
 
 async fn run_dashboard(state: ServerState) -> Result<()> {
     let addr = format!("{}:{}", state.cfg.dashboard_addr, state.cfg.dashboard_port);
-    let listener = TcpListener::bind(&addr)
+    let listener = bind_tcp_listener(&addr)
         .await
         .with_context(|| format!("listen dashboard on {addr}"))?;
     let local_addr = listener.local_addr().context("read dashboard address")?;
@@ -991,7 +1084,7 @@ async fn run_http_vhost(state: ServerState) -> Result<()> {
         "{}:{}",
         state.cfg.proxy_bind_addr, state.cfg.vhost_http_port
     );
-    let listener = TcpListener::bind(&addr)
+    let listener = bind_tcp_listener(&addr)
         .await
         .with_context(|| format!("listen http vhost on {addr}"))?;
     let local_addr = listener.local_addr().context("read http vhost address")?;
@@ -999,6 +1092,7 @@ async fn run_http_vhost(state: ServerState) -> Result<()> {
 
     loop {
         let (stream, peer) = listener.accept().await.context("accept http visitor")?;
+        configure_tcp_stream(&stream);
         state
             .metrics
             .visitor_connections_total
@@ -1017,7 +1111,7 @@ async fn run_https_vhost(state: ServerState) -> Result<()> {
         "{}:{}",
         state.cfg.proxy_bind_addr, state.cfg.vhost_https_port
     );
-    let listener = TcpListener::bind(&addr)
+    let listener = bind_tcp_listener(&addr)
         .await
         .with_context(|| format!("listen https vhost on {addr}"))?;
     let local_addr = listener.local_addr().context("read https vhost address")?;
@@ -1025,6 +1119,7 @@ async fn run_https_vhost(state: ServerState) -> Result<()> {
 
     loop {
         let (stream, peer) = listener.accept().await.context("accept https visitor")?;
+        configure_tcp_stream(&stream);
         state
             .metrics
             .visitor_connections_total
@@ -1125,22 +1220,67 @@ async fn handle_https_visitor(
 }
 
 async fn acquire_work_conn(control: &Arc<Control>) -> Result<BoxStream> {
-    if let Ok(work) = {
-        let mut rx = control.work_rx.lock().await;
-        rx.try_recv()
-    } {
-        if control.pool_count > 0 {
-            let _ = control.send(&Message::ReqWorkConn).await;
-        }
+    if let Some(work) = control.work_pool.pop().await {
+        schedule_replenish_work_pool(control.clone());
         return Ok(work);
     }
 
-    control.send(&Message::ReqWorkConn).await?;
-    let mut rx = control.work_rx.lock().await;
-    time::timeout(Duration::from_secs(10), rx.recv())
-        .await
-        .context("wait for client work connection timed out")?
-        .ok_or_else(|| anyhow!("client control closed before work connection arrived"))
+    let waiters = control.work_pool.waiters.fetch_add(1, Ordering::AcqRel) + 1;
+    let target = control.pool_count.saturating_add(waiters).max(1);
+    if let Err(err) = request_work_conns(control, target).await {
+        control.work_pool.waiters.fetch_sub(1, Ordering::AcqRel);
+        return Err(err);
+    }
+    let wait_for_work = async {
+        loop {
+            if let Some(work) = control.work_pool.pop().await {
+                schedule_replenish_work_pool(control.clone());
+                return Ok(work);
+            }
+            control.work_pool.notify.notified().await;
+        }
+    };
+
+    let result = time::timeout(Duration::from_secs(10), wait_for_work).await;
+    control.work_pool.waiters.fetch_sub(1, Ordering::AcqRel);
+    match result {
+        Ok(result) => result,
+        Err(err) => Err(err).context("wait for client work connection timed out"),
+    }
+}
+
+fn schedule_replenish_work_pool(control: Arc<Control>) {
+    if control.pool_count == 0 {
+        return;
+    }
+    tokio::spawn(async move {
+        if let Err(err) = replenish_work_pool(&control).await {
+            debug!(
+                "replenish work pool for control {} failed: {err:#}",
+                control.run_id
+            );
+        }
+    });
+}
+
+async fn replenish_work_pool(control: &Arc<Control>) -> Result<()> {
+    if control.pool_count == 0 {
+        return Ok(());
+    }
+    request_work_conns(control, control.pool_count).await
+}
+
+async fn request_work_conns(control: &Arc<Control>, target_available: usize) -> Result<()> {
+    let count = control.work_pool.reserve_missing(target_available);
+    if count == 0 {
+        return Ok(());
+    }
+    let msg = Message::ReqWorkConn { count };
+    if let Err(err) = control.send(&msg).await {
+        control.work_pool.release_reserved(count);
+        return Err(err);
+    }
+    Ok(())
 }
 
 async fn copy_bidirectional_limited<L, R>(
@@ -1152,6 +1292,12 @@ where
     L: AsyncRead + AsyncWrite + Unpin,
     R: AsyncRead + AsyncWrite + Unpin,
 {
+    if bytes_per_second.is_none() {
+        return io::copy_bidirectional(left, right)
+            .await
+            .context("copy relay streams");
+    }
+
     let (mut left_read, mut left_write) = tokio::io::split(left);
     let (mut right_read, mut right_write) = tokio::io::split(right);
     let left_to_right = copy_limited(&mut left_read, &mut right_write, bytes_per_second);
