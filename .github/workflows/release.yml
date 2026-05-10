@@ -1,0 +1,226 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.asset_os }}_${{ matrix.asset_arch }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            asset_os: darwin
+            asset_arch: amd64
+            archive: tar.gz
+            cross: false
+            exe: ""
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            asset_os: darwin
+            asset_arch: arm64
+            archive: tar.gz
+            cross: false
+            exe: ""
+          - runner: ubuntu-latest
+            target: x86_64-unknown-freebsd
+            asset_os: freebsd
+            asset_arch: amd64
+            archive: tar.gz
+            cross: true
+            exe: ""
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset_os: linux
+            asset_arch: amd64
+            archive: tar.gz
+            cross: true
+            exe: ""
+          - runner: ubuntu-latest
+            target: arm-unknown-linux-musleabi
+            asset_os: linux
+            asset_arch: arm
+            archive: tar.gz
+            cross: true
+            exe: ""
+          - runner: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            asset_os: linux
+            asset_arch: arm64
+            archive: tar.gz
+            cross: true
+            exe: ""
+          - runner: ubuntu-latest
+            target: armv7-unknown-linux-musleabihf
+            asset_os: linux
+            asset_arch: arm_hf
+            archive: tar.gz
+            cross: true
+            exe: ""
+          - runner: ubuntu-latest
+            target: loongarch64-unknown-linux-gnu
+            asset_os: linux
+            asset_arch: loong64
+            archive: tar.gz
+            cross: true
+            exe: ""
+          - runner: ubuntu-latest
+            target: mips-unknown-linux-musl
+            asset_os: linux
+            asset_arch: mips
+            archive: tar.gz
+            cross: true
+            exe: ""
+          - runner: ubuntu-latest
+            target: mips64-unknown-linux-muslabi64
+            asset_os: linux
+            asset_arch: mips64
+            archive: tar.gz
+            cross: true
+            exe: ""
+          - runner: ubuntu-latest
+            target: mips64el-unknown-linux-muslabi64
+            asset_os: linux
+            asset_arch: mips64le
+            archive: tar.gz
+            cross: true
+            exe: ""
+          - runner: ubuntu-latest
+            target: mipsel-unknown-linux-musl
+            asset_os: linux
+            asset_arch: mipsle
+            archive: tar.gz
+            cross: true
+            exe: ""
+          - runner: ubuntu-latest
+            target: riscv64gc-unknown-linux-musl
+            asset_os: linux
+            asset_arch: riscv64
+            archive: tar.gz
+            cross: true
+            exe: ""
+          - runner: ubuntu-latest
+            target: x86_64-unknown-openbsd
+            asset_os: openbsd
+            asset_arch: amd64
+            archive: tar.gz
+            cross: true
+            exe: ""
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset_os: windows
+            asset_arch: amd64
+            archive: zip
+            cross: false
+            exe: ".exe"
+          - runner: windows-latest
+            target: aarch64-pc-windows-msvc
+            asset_os: windows
+            asset_arch: arm64
+            archive: zip
+            cross: false
+            exe: ".exe"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build with cargo
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --target ${{ matrix.target }} --bins
+
+      - name: Build with cross
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }} --bins
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          package="frp-rs_${version}_${{ matrix.asset_os }}_${{ matrix.asset_arch }}"
+          asset="${package}.${{ matrix.archive }}"
+
+          mkdir -p "dist/${package}"
+          cp "target/${{ matrix.target }}/release/frps${{ matrix.exe }}" "dist/${package}/"
+          cp "target/${{ matrix.target }}/release/frpc${{ matrix.exe }}" "dist/${package}/"
+          cp README.md "dist/${package}/"
+          cp -R conf "dist/${package}/conf"
+          cp -R docs "dist/${package}/docs"
+
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            (cd dist && 7z a "${asset}" "${package}" >/dev/null)
+          else
+            tar -C dist -czf "dist/${asset}" "${package}"
+          fi
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frp-rs_${{ github.ref_name }}_${{ matrix.asset_os }}_${{ matrix.asset_arch }}
+          path: dist/frp-rs_*.${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: always()
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          if compgen -G "frp-rs_*" > /dev/null; then
+            sha256sum frp-rs_* | sort -k2 > frp-rs_sha256_checksums.txt
+          else
+            echo "no release packages were built" >&2
+            exit 1
+          fi
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            frp-rs release generated from `${{ github.sha }}`.
+
+            This release workflow follows the fatedier/frp release asset naming style and uploads the platform packages that build successfully for this Rust implementation.
+          files: |
+            release-assets/frp-rs_*
+            release-assets/frp-rs_sha256_checksums.txt
