@@ -3270,6 +3270,7 @@ async fn dashboard_api_lists_metrics_and_closes_proxy() {
     .await;
     assert!(clients.contains("200 OK"));
     assert!(clients.contains("work_pool_queued"));
+    assert!(clients.contains("work_pool_replenishing"));
 
     let metrics = http_request(
         dashboard_addr.clone(),

@@ -10,7 +10,7 @@ use std::{
     collections::{HashMap, VecDeque},
     net::{SocketAddr, ToSocketAddrs},
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -64,6 +64,7 @@ struct WorkPool {
     queued: AtomicUsize,
     pending: AtomicUsize,
     waiters: AtomicUsize,
+    replenishing: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -182,6 +183,7 @@ impl WorkPool {
             queued: AtomicUsize::new(0),
             pending: AtomicUsize::new(0),
             waiters: AtomicUsize::new(0),
+            replenishing: AtomicBool::new(false),
         }
     }
 
@@ -2313,6 +2315,7 @@ async fn client_list_json(state: &ServerState) -> Result<serde_json::Value> {
                 "work_pool_queued": control.work_pool.queued.load(Ordering::Relaxed),
                 "work_pool_pending": control.work_pool.pending.load(Ordering::Relaxed),
                 "work_pool_waiters": control.work_pool.waiters.load(Ordering::Relaxed),
+                "work_pool_replenishing": control.work_pool.replenishing.load(Ordering::Relaxed),
             })
         })
         .collect::<Vec<_>>();
@@ -2790,12 +2793,40 @@ fn schedule_replenish_work_pool(control: Arc<Control>) {
     if control.pool_count == 0 {
         return;
     }
+    if control
+        .work_pool
+        .replenishing
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
     tokio::spawn(async move {
-        if let Err(err) = replenish_work_pool(&control).await {
-            debug!(
-                "replenish work pool for control {} failed: {err:#}",
-                control.run_id
-            );
+        loop {
+            if let Err(err) = replenish_work_pool(&control).await {
+                debug!(
+                    "replenish work pool for control {} failed: {err:#}",
+                    control.run_id
+                );
+            }
+
+            control
+                .work_pool
+                .replenishing
+                .store(false, Ordering::Release);
+
+            if control.work_pool.available() >= control.pool_count {
+                break;
+            }
+            if control
+                .work_pool
+                .replenishing
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                break;
+            }
         }
     });
 }
@@ -3525,6 +3556,49 @@ fn normalize_locations(locations: &[String]) -> Vec<String> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::duplex;
+
+    fn test_control(pool_count: usize) -> (Arc<Control>, tokio::io::DuplexStream) {
+        let (client, server) = duplex(4096);
+        let stream: BoxStream = Box::new(client);
+        let (_reader, writer) = tokio::io::split(stream);
+        let control = Arc::new(Control {
+            run_id: "test-run".to_string(),
+            peer_addr: "127.0.0.1:1".parse().unwrap(),
+            pool_count,
+            writer: Mutex::new(writer),
+            work_pool: WorkPool::new(),
+        });
+        (control, server)
+    }
+
+    #[tokio::test]
+    async fn work_pool_replenish_requests_are_coalesced() {
+        let (control, mut server) = test_control(3);
+
+        for _ in 0..8 {
+            schedule_replenish_work_pool(control.clone());
+        }
+
+        match time::timeout(Duration::from_secs(1), read_msg(&mut server))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Message::ReqWorkConn { count } => assert_eq!(count, 3),
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        let second = time::timeout(Duration::from_millis(100), read_msg(&mut server)).await;
+        assert!(second.is_err(), "unexpected duplicate replenish request");
+        assert_eq!(control.work_pool.pending.load(Ordering::Acquire), 3);
+        assert!(!control.work_pool.replenishing.load(Ordering::Acquire));
+    }
 }
 
 fn http_basic_auth_matches(prefix: &[u8], route: &ProxyRoute) -> bool {
