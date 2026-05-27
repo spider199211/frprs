@@ -2,19 +2,21 @@ use crate::{
     config::{
         ClientConfig, HealthCheckType, ProxyConfig, ProxyType, TransportProtocol, VisitorConfig,
     },
-    protocol::{read_msg, write_msg, Message},
+    protocol::{read_msg, write_msg, Message, UdpPacketFrame},
     transports::{self, BoxStream},
 };
 use anyhow::{anyhow, bail, Context, Result};
+use serde_json::json;
 use std::{
     collections::HashMap,
     env, fs,
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    io::{self, WriteHalf},
+    io::{self, AsyncReadExt, AsyncWriteExt, WriteHalf},
     net::{TcpListener, TcpStream, UdpSocket},
     sync::Mutex,
     time,
@@ -26,7 +28,15 @@ struct ClientState {
     cfg: Arc<ClientConfig>,
     run_id: String,
     proxies: Arc<HashMap<String, ProxyConfig>>,
+    udp_sessions: Arc<Mutex<HashMap<(String, String), Arc<UdpSocket>>>>,
+    sudp_visitor_sessions: Arc<Mutex<HashMap<String, SudpVisitorSession>>>,
     writer: Arc<Mutex<WriteHalf<BoxStream>>>,
+}
+
+#[derive(Clone)]
+struct SudpVisitorSession {
+    socket: Arc<UdpSocket>,
+    peer: SocketAddr,
 }
 
 impl ClientState {
@@ -123,6 +133,8 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
         cfg,
         run_id,
         proxies,
+        udp_sessions: Arc::new(Mutex::new(HashMap::new())),
+        sudp_visitor_sessions: Arc::new(Mutex::new(HashMap::new())),
         writer: Arc::new(Mutex::new(writer)),
     };
 
@@ -197,6 +209,33 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
                     }
                 });
             }
+            Message::UdpPacketBatch { packets } => {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = handle_udp_packet_batch(state, packets).await {
+                        warn!("udp packet batch handling failed: {err:#}");
+                    }
+                });
+            }
+            Message::SudpPacket {
+                proxy_name,
+                session_id,
+                content,
+                from_visitor,
+                ..
+            } => {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let result = if from_visitor {
+                        handle_sudp_owner_packet(state, proxy_name, session_id, content).await
+                    } else {
+                        handle_sudp_visitor_response(state, session_id, content).await
+                    };
+                    if let Err(err) = result {
+                        warn!("sudp packet handling failed: {err:#}");
+                    }
+                });
+            }
             Message::Pong { error } if error.is_empty() => {
                 debug!("server pong");
             }
@@ -227,7 +266,14 @@ async fn register_proxy(state: &ClientState, proxy: &ProxyConfig) -> Result<()> 
             proxy_name: proxy.name.clone(),
             proxy_type: proxy.proxy_type.as_str().to_string(),
             remote_port: proxy.remote_port,
+            group: proxy.group.clone(),
+            group_key: proxy.group_key.clone(),
             custom_domains: proxy.custom_domains.clone(),
+            locations: proxy.locations.clone(),
+            host_header_rewrite: proxy.host_header_rewrite.clone(),
+            request_headers: proxy.request_headers.set.clone(),
+            http_user: proxy.http_user.clone(),
+            http_password: proxy.http_password.clone(),
             bandwidth_limit: proxy.bandwidth_limit.clone(),
             sk: proxy.sk.clone(),
         })
@@ -242,6 +288,16 @@ async fn connect_control(cfg: &ClientConfig) -> Result<BoxStream> {
                 .await
                 .with_context(|| format!("connect tcp frps at {server_addr}"))?;
             configure_tcp_stream(&stream);
+            Ok(Box::new(stream))
+        }
+        TransportProtocol::Tls => {
+            let server_addr = resolve_server_addr(cfg).await?;
+            let stream = transports::tls::connect_insecure(server_addr).await?;
+            Ok(Box::new(stream))
+        }
+        TransportProtocol::Websocket => {
+            let server_addr = resolve_server_addr(cfg).await?;
+            let stream = transports::websocket::connect(server_addr).await?;
             Ok(Box::new(stream))
         }
         TransportProtocol::Kcp => {
@@ -277,13 +333,9 @@ async fn close_proxy(state: &ClientState, proxy_name: &str) -> Result<()> {
 
 async fn run_visitor_listener(state: ClientState, visitor: VisitorConfig) -> Result<()> {
     match visitor.visitor_type {
-        ProxyType::Stcp => {}
-        ProxyType::Sudp | ProxyType::Xtcp => {
-            bail!(
-                "visitor {} type {} is recognized but not implemented yet",
-                visitor.name,
-                visitor.visitor_type.as_str()
-            );
+        ProxyType::Stcp | ProxyType::Xtcp => {}
+        ProxyType::Sudp => {
+            return run_sudp_visitor_listener(state, visitor).await;
         }
         other => {
             bail!(
@@ -356,6 +408,48 @@ async fn handle_stcp_visitor(
     Ok(())
 }
 
+async fn run_sudp_visitor_listener(state: ClientState, visitor: VisitorConfig) -> Result<()> {
+    let bind_addr = format!("{}:{}", visitor.bind_addr, visitor.bind_port);
+    let socket = Arc::new(
+        UdpSocket::bind(&bind_addr)
+            .await
+            .with_context(|| format!("listen sudp visitor {} on {bind_addr}", visitor.name))?,
+    );
+    let local_addr = socket
+        .local_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or(bind_addr);
+    info!(
+        "sudp visitor {} listening on {} for serverName={}",
+        visitor.name, local_addr, visitor.server_name
+    );
+
+    let mut buf = vec![0_u8; 64 * 1024];
+    loop {
+        let (n, peer) = socket
+            .recv_from(&mut buf)
+            .await
+            .with_context(|| format!("recv sudp visitor {}", visitor.name))?;
+        let session_id = format!("{}|{peer}", visitor.name);
+        state.sudp_visitor_sessions.lock().await.insert(
+            session_id.clone(),
+            SudpVisitorSession {
+                socket: socket.clone(),
+                peer,
+            },
+        );
+        state
+            .send(&Message::SudpPacket {
+                proxy_name: visitor.server_name.clone(),
+                session_id,
+                content: buf[..n].to_vec(),
+                sk: visitor.sk.clone(),
+                from_visitor: true,
+            })
+            .await?;
+    }
+}
+
 fn config_modified(path: &Path) -> Result<SystemTime> {
     fs::metadata(path)
         .with_context(|| format!("read metadata for config {}", path.display()))?
@@ -373,6 +467,17 @@ async fn run_health_check(state: ClientState, proxy: ProxyConfig) -> Result<()> 
 
     loop {
         let healthy = check_proxy_health(&proxy, health.check_type, health.timeout_seconds).await;
+        let check_type = health_check_type_name(health.check_type).to_string();
+        let detail = if healthy {
+            "ok".to_string()
+        } else {
+            format!(
+                "failed to reach {}:{} within {}s",
+                proxy.local_ip,
+                proxy.local_port,
+                health.timeout_seconds.max(1)
+            )
+        };
 
         if healthy {
             failed = 0;
@@ -394,7 +499,26 @@ async fn run_health_check(state: ClientState, proxy: ProxyConfig) -> Result<()> 
             }
         }
 
+        if active {
+            state
+                .send(&Message::HealthStatus {
+                    proxy_name: proxy.name.clone(),
+                    healthy,
+                    check_type,
+                    detail,
+                    checked_unix_secs: unix_now(),
+                })
+                .await?;
+        }
+
         time::sleep(Duration::from_secs(health.interval_seconds.max(1))).await;
+    }
+}
+
+fn health_check_type_name(check_type: HealthCheckType) -> &'static str {
+    match check_type {
+        HealthCheckType::Tcp => "tcp",
+        HealthCheckType::Http => "http",
     }
 }
 
@@ -415,7 +539,43 @@ async fn check_proxy_health(
                 Ok(Ok(_))
             )
         }
+        HealthCheckType::Http => check_http_health(proxy, timeout_seconds).await,
     }
+}
+
+async fn check_http_health(proxy: &ProxyConfig, timeout_seconds: u64) -> bool {
+    let addr = format!("{}:{}", proxy.local_ip, proxy.local_port);
+    let timeout = Duration::from_secs(timeout_seconds.max(1));
+    let mut stream = match time::timeout(timeout, TcpStream::connect(&addr)).await {
+        Ok(Ok(stream)) => stream,
+        _ => return false,
+    };
+    let request =
+        format!("GET / HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+    if !matches!(
+        time::timeout(timeout, stream.write_all(request.as_bytes())).await,
+        Ok(Ok(()))
+    ) {
+        return false;
+    }
+
+    let mut buf = [0_u8; 64];
+    let n = match time::timeout(timeout, stream.read(&mut buf)).await {
+        Ok(Ok(n)) => n,
+        _ => return false,
+    };
+    let status = std::str::from_utf8(&buf[..n]).unwrap_or_default();
+    status.starts_with("HTTP/1.1 2")
+        || status.starts_with("HTTP/1.0 2")
+        || status.starts_with("HTTP/1.1 3")
+        || status.starts_with("HTTP/1.0 3")
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 async fn open_work_conn(state: ClientState) -> Result<()> {
@@ -433,10 +593,13 @@ async fn open_work_conn(state: ClientState) -> Result<()> {
     .await?;
 
     let start = read_msg(&mut stream).await?;
-    let proxy_name = match start {
+    let (proxy_name, src_addr, dst_addr) = match start {
         Message::StartWorkConn {
-            proxy_name, error, ..
-        } if error.is_empty() => proxy_name,
+            proxy_name,
+            src_addr,
+            dst_addr,
+            error,
+        } if error.is_empty() => (proxy_name, src_addr, dst_addr),
         Message::StartWorkConn { error, .. } => bail!("server rejected work connection: {error}"),
         other => bail!("unexpected work connection response: {other:?}"),
     };
@@ -446,6 +609,18 @@ async fn open_work_conn(state: ClientState) -> Result<()> {
         .get(&proxy_name)
         .ok_or_else(|| anyhow!("unknown proxy {proxy_name}"))?;
     let local_addr = format!("{}:{}", proxy.local_ip, proxy.local_port);
+    call_client_plugin_hook(
+        state.cfg.plugins.local_connect_url.as_deref(),
+        json!({
+            "op": "LocalConnect",
+            "proxy_name": proxy_name,
+            "proxy_type": proxy.proxy_type.as_str(),
+            "local_addr": local_addr,
+            "src_addr": src_addr,
+            "dst_addr": dst_addr,
+        }),
+    )
+    .await?;
     let mut local = TcpStream::connect(&local_addr)
         .await
         .with_context(|| format!("connect local service for proxy {proxy_name} at {local_addr}"))?;
@@ -463,6 +638,68 @@ fn configure_tcp_stream(stream: &TcpStream) {
     }
 }
 
+async fn call_client_plugin_hook(url: Option<&str>, payload: serde_json::Value) -> Result<()> {
+    let Some(url) = url else {
+        return Ok(());
+    };
+    let target = parse_http_url(url)?;
+    let body = payload.to_string();
+    let mut stream = time::timeout(
+        Duration::from_secs(5),
+        TcpStream::connect(format!("{}:{}", target.host, target.port)),
+    )
+    .await
+    .context("connect client plugin hook timed out")?
+    .with_context(|| format!("connect client plugin hook {url}"))?;
+    let request = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        target.path,
+        target.host,
+        body.len(),
+        body
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .with_context(|| format!("write client plugin hook request {url}"))?;
+    let mut response = vec![0_u8; 128];
+    let n = time::timeout(Duration::from_secs(5), stream.read(&mut response))
+        .await
+        .context("read client plugin hook response timed out")?
+        .with_context(|| format!("read client plugin hook response {url}"))?;
+    let status = std::str::from_utf8(&response[..n]).unwrap_or_default();
+    let ok = status.starts_with("HTTP/1.1 2") || status.starts_with("HTTP/1.0 2");
+    if !ok {
+        bail!("client plugin hook {url} rejected request: {status:?}");
+    }
+    Ok(())
+}
+
+struct ParsedHttpUrl {
+    host: String,
+    port: u16,
+    path: String,
+}
+
+fn parse_http_url(url: &str) -> Result<ParsedHttpUrl> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| anyhow!("only http:// client plugin hooks are supported"))?;
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host.to_string(), port.parse::<u16>()?),
+        None => (authority.to_string(), 80),
+    };
+    if host.is_empty() {
+        bail!("client plugin hook URL has empty host");
+    }
+    Ok(ParsedHttpUrl {
+        host,
+        port,
+        path: format!("/{path}"),
+    })
+}
+
 async fn handle_udp_packet(
     state: ClientState,
     proxy_name: String,
@@ -474,25 +711,196 @@ async fn handle_udp_packet(
         .get(&proxy_name)
         .ok_or_else(|| anyhow!("unknown udp proxy {proxy_name}"))?;
     let local_addr = format!("{}:{}", proxy.local_ip, proxy.local_port);
-    let socket = UdpSocket::bind("0.0.0.0:0")
-        .await
-        .context("bind local udp relay socket")?;
+    let key = (proxy_name.clone(), visitor_addr.clone());
+    let socket = {
+        let mut sessions = state.udp_sessions.lock().await;
+        if let Some(socket) = sessions.get(&key) {
+            socket.clone()
+        } else {
+            call_client_plugin_hook(
+                state.cfg.plugins.local_connect_url.as_deref(),
+                json!({
+                    "op": "LocalConnect",
+                    "proxy_name": proxy_name.clone(),
+                    "proxy_type": proxy.proxy_type.as_str(),
+                    "local_addr": local_addr.clone(),
+                    "src_addr": visitor_addr.clone(),
+                    "dst_addr": "",
+                }),
+            )
+            .await?;
+            let socket = Arc::new(
+                UdpSocket::bind("0.0.0.0:0")
+                    .await
+                    .context("bind local udp relay socket")?,
+            );
+            sessions.insert(key.clone(), socket.clone());
+            spawn_udp_response_loop(state.clone(), key, socket.clone());
+            socket
+        }
+    };
     socket
         .send_to(&content, &local_addr)
         .await
         .with_context(|| format!("send udp packet to local service {local_addr}"))?;
+    Ok(())
+}
 
-    let mut buf = vec![0_u8; 64 * 1024];
-    let (n, _) = time::timeout(Duration::from_secs(5), socket.recv_from(&mut buf))
-        .await
-        .context("wait local udp response timed out")?
-        .context("read local udp response")?;
+async fn handle_udp_packet_batch(state: ClientState, packets: Vec<UdpPacketFrame>) -> Result<()> {
+    for packet in packets {
+        handle_udp_packet(
+            state.clone(),
+            packet.proxy_name,
+            packet.content,
+            packet.visitor_addr,
+        )
+        .await?;
+    }
+    Ok(())
+}
 
-    state
-        .send(&Message::UdpPacket {
-            proxy_name,
-            content: buf[..n].to_vec(),
-            visitor_addr,
-        })
+async fn handle_sudp_owner_packet(
+    state: ClientState,
+    proxy_name: String,
+    session_id: String,
+    content: Vec<u8>,
+) -> Result<()> {
+    let proxy = state
+        .proxies
+        .get(&proxy_name)
+        .ok_or_else(|| anyhow!("unknown sudp proxy {proxy_name}"))?;
+    let local_addr = format!("{}:{}", proxy.local_ip, proxy.local_port);
+    let key = (proxy_name.clone(), session_id.clone());
+    let socket = {
+        let mut sessions = state.udp_sessions.lock().await;
+        if let Some(socket) = sessions.get(&key) {
+            socket.clone()
+        } else {
+            call_client_plugin_hook(
+                state.cfg.plugins.local_connect_url.as_deref(),
+                json!({
+                    "op": "LocalConnect",
+                    "proxy_name": proxy_name.clone(),
+                    "proxy_type": proxy.proxy_type.as_str(),
+                    "local_addr": local_addr.clone(),
+                    "src_addr": session_id.clone(),
+                    "dst_addr": "",
+                }),
+            )
+            .await?;
+            let socket = Arc::new(
+                UdpSocket::bind("0.0.0.0:0")
+                    .await
+                    .context("bind local sudp relay socket")?,
+            );
+            sessions.insert(key.clone(), socket.clone());
+            spawn_sudp_owner_response_loop(state.clone(), key, socket.clone());
+            socket
+        }
+    };
+    socket
+        .send_to(&content, &local_addr)
         .await
+        .with_context(|| format!("send sudp packet to local service {local_addr}"))?;
+    Ok(())
+}
+
+fn spawn_sudp_owner_response_loop(
+    state: ClientState,
+    key: (String, String),
+    socket: Arc<UdpSocket>,
+) {
+    tokio::spawn(async move {
+        let mut buf = vec![0_u8; 64 * 1024];
+        loop {
+            let received = time::timeout(Duration::from_secs(60), socket.recv_from(&mut buf)).await;
+            let n = match received {
+                Ok(Ok((n, _))) => n,
+                Ok(Err(err)) => {
+                    debug!("sudp owner recv failed: {err:#}");
+                    break;
+                }
+                Err(_) => break,
+            };
+            if let Err(err) = state
+                .send(&Message::SudpPacket {
+                    proxy_name: key.0.clone(),
+                    session_id: key.1.clone(),
+                    content: buf[..n].to_vec(),
+                    sk: None,
+                    from_visitor: false,
+                })
+                .await
+            {
+                debug!("sudp owner response send failed: {err:#}");
+                break;
+            }
+        }
+
+        let mut sessions = state.udp_sessions.lock().await;
+        if sessions
+            .get(&key)
+            .map(|current| Arc::ptr_eq(current, &socket))
+            .unwrap_or(false)
+        {
+            sessions.remove(&key);
+        }
+    });
+}
+
+async fn handle_sudp_visitor_response(
+    state: ClientState,
+    session_id: String,
+    content: Vec<u8>,
+) -> Result<()> {
+    let session = {
+        let sessions = state.sudp_visitor_sessions.lock().await;
+        sessions
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown sudp visitor session {session_id}"))?
+    };
+    session
+        .socket
+        .send_to(&content, session.peer)
+        .await
+        .context("send sudp response to visitor peer")?;
+    Ok(())
+}
+
+fn spawn_udp_response_loop(state: ClientState, key: (String, String), socket: Arc<UdpSocket>) {
+    tokio::spawn(async move {
+        let mut buf = vec![0_u8; 64 * 1024];
+        loop {
+            let received = time::timeout(Duration::from_secs(60), socket.recv_from(&mut buf)).await;
+            let n = match received {
+                Ok(Ok((n, _))) => n,
+                Ok(Err(err)) => {
+                    debug!("udp session recv failed: {err:#}");
+                    break;
+                }
+                Err(_) => break,
+            };
+            if let Err(err) = state
+                .send(&Message::UdpPacket {
+                    proxy_name: key.0.clone(),
+                    content: buf[..n].to_vec(),
+                    visitor_addr: key.1.clone(),
+                })
+                .await
+            {
+                debug!("udp session response send failed: {err:#}");
+                break;
+            }
+        }
+
+        let mut sessions = state.udp_sessions.lock().await;
+        if sessions
+            .get(&key)
+            .map(|current| Arc::ptr_eq(current, &socket))
+            .unwrap_or(false)
+        {
+            sessions.remove(&key);
+        }
+    });
 }

@@ -1,7 +1,8 @@
-use frprs::transports::{kcp, quic};
+use frprs::transports::{kcp, quic, tls, websocket};
 use std::net::SocketAddr;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
     time::{timeout, Duration},
 };
 
@@ -63,6 +64,62 @@ async fn kcp_stream_round_trips_bytes() {
         .unwrap()
         .unwrap();
     assert_eq!(&response, b"kcp ok");
+
+    server_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tls_stream_round_trips_bytes() {
+    let listener = TcpListener::bind(loopback_any_port()).await.unwrap();
+    let server_addr = listener.local_addr().unwrap();
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = tls::accept(stream).await.unwrap();
+        let mut request = [0_u8; 9];
+        stream.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"hello tls");
+        stream.write_all(b"tls ok").await.unwrap();
+        stream.flush().await.unwrap();
+    });
+
+    let mut stream = tls::connect_insecure(server_addr).await.unwrap();
+    stream.write_all(b"hello tls").await.unwrap();
+    stream.flush().await.unwrap();
+    let mut response = [0_u8; 6];
+    timeout(Duration::from_secs(5), stream.read_exact(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&response, b"tls ok");
+
+    server_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_stream_round_trips_bytes() {
+    let listener = TcpListener::bind(loopback_any_port()).await.unwrap();
+    let server_addr = listener.local_addr().unwrap();
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = websocket::accept(stream).await.unwrap();
+        let mut request = [0_u8; 15];
+        stream.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"hello websocket");
+        stream.write_all(b"websocket ok").await.unwrap();
+        stream.flush().await.unwrap();
+    });
+
+    let mut stream = websocket::connect(server_addr).await.unwrap();
+    stream.write_all(b"hello websocket").await.unwrap();
+    stream.flush().await.unwrap();
+    let mut response = [0_u8; 12];
+    timeout(Duration::from_secs(5), stream.read_exact(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&response, b"websocket ok");
 
     server_task.await.unwrap();
 }

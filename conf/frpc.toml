@@ -7,8 +7,13 @@ token = "change-me"
 
 [transport]
 protocol = "tcp"
+# protocol = "tls"
+# protocol = "websocket"
 # protocol = "kcp"
 # protocol = "quic"
+
+# [plugins]
+# localConnectURL = "http://127.0.0.1:9001/local_connect"
 
 [[proxies]]
 name = "ssh"
@@ -17,6 +22,8 @@ localIP = "127.0.0.1"
 localPort = 22
 remotePort = 6000
 bandwidthLimit = "10MB"
+# group = "ssh-group"
+# groupKey = "shared-secret"
 
 # [proxies.healthCheck]
 # type = "tcp"
@@ -30,6 +37,8 @@ bandwidthLimit = "10MB"
 # localIP = "127.0.0.1"
 # localPort = 8081
 # customDomains = ["www.example.com"]
+# group = "web-group"
+# groupKey = "shared-secret"
 
 # [[proxies]]
 # name = "secure-web"
@@ -37,6 +46,16 @@ bandwidthLimit = "10MB"
 # localIP = "127.0.0.1"
 # localPort = 8444
 # customDomains = ["secure.example.com"]
+# customDomains = ["*"]
+
+# [[proxies]]
+# name = "connect-ssh"
+# type = "tcpmux"
+# localIP = "127.0.0.1"
+# localPort = 22
+# customDomains = ["ssh.example.com"]
+# group = "ssh-mux-group"
+# groupKey = "shared-secret"
 
 # [[proxies]]
 # name = "dns"
@@ -44,12 +63,30 @@ bandwidthLimit = "10MB"
 # localIP = "8.8.8.8"
 # localPort = 53
 # remotePort = 5353
+# group = "dns-group"
+# groupKey = "shared-secret"
 
 # [[proxies]]
 # name = "private-ssh"
 # type = "stcp"
 # localIP = "127.0.0.1"
 # localPort = 22
+# sk = "private-secret"
+# group = "private-ssh-group"
+# groupKey = "shared-secret"
+
+# [[proxies]]
+# name = "private-xtcp-ssh"
+# type = "xtcp"
+# localIP = "127.0.0.1"
+# localPort = 22
+# sk = "private-secret"
+
+# [[proxies]]
+# name = "private-dns"
+# type = "sudp"
+# localIP = "127.0.0.1"
+# localPort = 5353
 # sk = "private-secret"
 
 # [[visitors]]
@@ -58,4 +95,20 @@ bandwidthLimit = "10MB"
 # serverName = "private-ssh"
 # bindAddr = "127.0.0.1"
 # bindPort = 16022
+# sk = "private-secret"
+
+# [[visitors]]
+# name = "private-xtcp-ssh-visitor"
+# type = "xtcp"
+# serverName = "private-xtcp-ssh"
+# bindAddr = "127.0.0.1"
+# bindPort = 16023
+# sk = "private-secret"
+
+# [[visitors]]
+# name = "private-dns-visitor"
+# type = "sudp"
+# serverName = "private-dns"
+# bindAddr = "127.0.0.1"
+# bindPort = 15353
 # sk = "private-secret"

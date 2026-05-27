@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const MAX_FRAME_SIZE: u32 = 16 * 1024 * 1024;
@@ -25,7 +26,14 @@ pub enum Message {
         proxy_name: String,
         proxy_type: String,
         remote_port: u16,
+        group: Option<String>,
+        group_key: Option<String>,
         custom_domains: Vec<String>,
+        locations: Vec<String>,
+        host_header_rewrite: Option<String>,
+        request_headers: HashMap<String, String>,
+        http_user: Option<String>,
+        http_password: Option<String>,
         bandwidth_limit: Option<String>,
         sk: Option<String>,
     },
@@ -46,6 +54,13 @@ pub enum Message {
     CloseProxy {
         proxy_name: String,
     },
+    HealthStatus {
+        proxy_name: String,
+        healthy: bool,
+        check_type: String,
+        detail: String,
+        checked_unix_secs: u64,
+    },
     NewWorkConn {
         run_id: String,
         token: Option<String>,
@@ -63,6 +78,16 @@ pub enum Message {
         proxy_name: String,
         content: Vec<u8>,
         visitor_addr: String,
+    },
+    UdpPacketBatch {
+        packets: Vec<UdpPacketFrame>,
+    },
+    SudpPacket {
+        proxy_name: String,
+        session_id: String,
+        content: Vec<u8>,
+        sk: Option<String>,
+        from_visitor: bool,
     },
     NatHoleRegister {
         transaction_id: String,
@@ -86,6 +111,13 @@ pub enum Message {
     Pong {
         error: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UdpPacketFrame {
+    pub proxy_name: String,
+    pub content: Vec<u8>,
+    pub visitor_addr: String,
 }
 
 pub async fn read_msg<R>(reader: &mut R) -> Result<Message>

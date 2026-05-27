@@ -5,15 +5,20 @@ vhostHTTPPort = 0
 vhostHTTPSPort = 0
 dashboardAddr = "127.0.0.1"
 dashboardPort = 7500
+# Empty means all remote ports are allowed. Examples: ["6000", "7000-7100"].
+allowPorts = []
 
 [auth]
 token = "change-me"
 
 [transport]
 protocol = "tcp"
+# protocol = "tls"
+# protocol = "websocket"
 # protocol = "kcp"
 # protocol = "quic"
 
 # [plugins]
 # loginURL = "http://127.0.0.1:9000/login"
 # newProxyURL = "http://127.0.0.1:9000/new_proxy"
+# closeProxyURL = "http://127.0.0.1:9000/close_proxy"

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::{fs, path::Path};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -18,6 +19,8 @@ pub struct ServerConfig {
     pub dashboard_addr: String,
     #[serde(rename = "dashboardPort", default)]
     pub dashboard_port: u16,
+    #[serde(rename = "allowPorts", default)]
+    pub allow_ports: Vec<String>,
     #[serde(default)]
     pub auth: AuthConfig,
     #[serde(default)]
@@ -39,6 +42,8 @@ pub struct ClientConfig {
     #[serde(default)]
     pub transport: TransportConfig,
     #[serde(default)]
+    pub plugins: ClientPluginConfig,
+    #[serde(default)]
     pub proxies: Vec<ProxyConfig>,
     #[serde(default)]
     pub visitors: Vec<VisitorConfig>,
@@ -55,6 +60,14 @@ pub struct ServerPluginConfig {
     pub login_url: Option<String>,
     #[serde(rename = "newProxyURL", default)]
     pub new_proxy_url: Option<String>,
+    #[serde(rename = "closeProxyURL", default)]
+    pub close_proxy_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ClientPluginConfig {
+    #[serde(rename = "localConnectURL", default)]
+    pub local_connect_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -75,6 +88,8 @@ impl Default for TransportConfig {
 #[serde(rename_all = "lowercase")]
 pub enum TransportProtocol {
     Tcp,
+    Tls,
+    Websocket,
     Quic,
     Kcp,
 }
@@ -90,14 +105,34 @@ pub struct ProxyConfig {
     pub local_port: u16,
     #[serde(rename = "remotePort", default)]
     pub remote_port: u16,
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(rename = "groupKey", default)]
+    pub group_key: Option<String>,
     #[serde(rename = "customDomains", default)]
     pub custom_domains: Vec<String>,
+    #[serde(default)]
+    pub locations: Vec<String>,
+    #[serde(rename = "hostHeaderRewrite", default)]
+    pub host_header_rewrite: Option<String>,
+    #[serde(rename = "requestHeaders", default)]
+    pub request_headers: HeaderRewriteConfig,
+    #[serde(rename = "httpUser", default)]
+    pub http_user: Option<String>,
+    #[serde(rename = "httpPassword", default)]
+    pub http_password: Option<String>,
     #[serde(rename = "bandwidthLimit", default)]
     pub bandwidth_limit: Option<String>,
     #[serde(default)]
     pub sk: Option<String>,
     #[serde(rename = "healthCheck", default)]
     pub health_check: Option<HealthCheckConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HeaderRewriteConfig {
+    #[serde(default)]
+    pub set: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -134,6 +169,7 @@ pub struct HealthCheckConfig {
 #[serde(rename_all = "lowercase")]
 pub enum HealthCheckType {
     Tcp,
+    Http,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,7 +250,11 @@ fn default_transport_protocol() -> TransportProtocol {
 
 fn ensure_supported_transport(protocol: TransportProtocol) -> Result<()> {
     match protocol {
-        TransportProtocol::Tcp | TransportProtocol::Quic | TransportProtocol::Kcp => Ok(()),
+        TransportProtocol::Tcp
+        | TransportProtocol::Tls
+        | TransportProtocol::Websocket
+        | TransportProtocol::Quic
+        | TransportProtocol::Kcp => Ok(()),
     }
 }
 
@@ -253,17 +293,29 @@ mod tests {
             serverAddr = "127.0.0.1"
             serverPort = 7000
 
+            [plugins]
+            localConnectURL = "http://127.0.0.1:9001/local_connect"
+
             [[proxies]]
             name = "ssh"
             type = "tcp"
             localIP = "127.0.0.1"
             localPort = 22
             remotePort = 6000
+            group = "ssh-group"
+            groupKey = "group-secret"
             bandwidthLimit = "1MB"
             sk = "private"
+            locations = ["/api"]
+            hostHeaderRewrite = "backend.local"
+            httpUser = "alice"
+            httpPassword = "secret"
+
+            [proxies.requestHeaders.set]
+            X-Test = "yes"
 
             [proxies.healthCheck]
-            type = "tcp"
+            type = "http"
             intervalSeconds = 5
 
             [[visitors]]
@@ -277,11 +329,56 @@ mod tests {
         .unwrap();
 
         assert_eq!(cfg.server_addr(), "127.0.0.1:7000");
+        assert_eq!(
+            cfg.plugins.local_connect_url.as_deref(),
+            Some("http://127.0.0.1:9001/local_connect")
+        );
         assert_eq!(cfg.proxies[0].proxy_type, ProxyType::Tcp);
+        assert_eq!(cfg.proxies[0].group.as_deref(), Some("ssh-group"));
+        assert_eq!(cfg.proxies[0].group_key.as_deref(), Some("group-secret"));
+        assert_eq!(cfg.proxies[0].locations, vec!["/api"]);
+        assert_eq!(
+            cfg.proxies[0].host_header_rewrite.as_deref(),
+            Some("backend.local")
+        );
+        assert_eq!(
+            cfg.proxies[0]
+                .request_headers
+                .set
+                .get("X-Test")
+                .map(String::as_str),
+            Some("yes")
+        );
+        assert_eq!(cfg.proxies[0].http_user.as_deref(), Some("alice"));
+        assert_eq!(cfg.proxies[0].http_password.as_deref(), Some("secret"));
         assert_eq!(cfg.proxies[0].bandwidth_limit.as_deref(), Some("1MB"));
         assert_eq!(cfg.proxies[0].sk.as_deref(), Some("private"));
-        assert!(cfg.proxies[0].health_check.is_some());
+        assert_eq!(
+            cfg.proxies[0].health_check.as_ref().unwrap().check_type,
+            HealthCheckType::Http
+        );
         assert_eq!(cfg.visitors[0].server_name, "ssh");
         assert_eq!(cfg.visitors[0].bind_addr, "127.0.0.1");
+    }
+
+    #[test]
+    fn parses_server_allow_ports() {
+        let cfg: ServerConfig = toml::from_str(
+            r#"
+            bindAddr = "127.0.0.1"
+            bindPort = 7000
+            allowPorts = ["6000", "7000-7010"]
+
+            [plugins]
+            closeProxyURL = "http://127.0.0.1:9000/close_proxy"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(cfg.allow_ports, vec!["6000", "7000-7010"]);
+        assert_eq!(
+            cfg.plugins.close_proxy_url.as_deref(),
+            Some("http://127.0.0.1:9000/close_proxy")
+        );
     }
 }

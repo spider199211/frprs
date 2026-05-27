@@ -1,7 +1,7 @@
 use crate::{
     config::{ServerConfig, TransportProtocol},
     nathole::{NatHoleController, NatHoleOutcome, NatHolePeer, NatHoleRole},
-    protocol::{read_msg, write_msg, Message},
+    protocol::{read_msg, write_msg, Message, UdpPacketFrame},
     transports::{self, BoxStream},
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -18,7 +18,7 @@ use std::{
 use tokio::{
     io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf},
     net::{TcpListener, TcpSocket, TcpStream, UdpSocket},
-    sync::{Mutex, Notify},
+    sync::{mpsc, Mutex, Notify},
     task::JoinHandle,
     time,
 };
@@ -29,17 +29,30 @@ use uuid::Uuid;
 struct ServerState {
     cfg: Arc<ServerConfig>,
     controls: Arc<Mutex<HashMap<String, Arc<Control>>>>,
-    http_routes: Arc<Mutex<HashMap<String, ProxyRoute>>>,
-    https_routes: Arc<Mutex<HashMap<String, ProxyRoute>>>,
+    http_routes: Arc<Mutex<HashMap<String, Vec<ProxyRoute>>>>,
+    http_route_next: Arc<Mutex<HashMap<String, usize>>>,
+    tcpmux_routes: Arc<Mutex<HashMap<String, Vec<ProxyRoute>>>>,
+    tcpmux_route_next: Arc<Mutex<HashMap<String, usize>>>,
+    https_routes: Arc<Mutex<HashMap<String, Vec<ProxyRoute>>>>,
+    https_route_next: Arc<Mutex<HashMap<String, usize>>>,
     stcp_routes: Arc<Mutex<HashMap<String, StcpRoute>>>,
+    stcp_groups: Arc<Mutex<HashMap<String, StcpGroup>>>,
+    xtcp_routes: Arc<Mutex<HashMap<String, StcpRoute>>>,
+    xtcp_groups: Arc<Mutex<HashMap<String, StcpGroup>>>,
+    sudp_routes: Arc<Mutex<HashMap<String, SudpRoute>>>,
+    sudp_sessions: Arc<Mutex<HashMap<(String, String), Arc<Control>>>>,
+    tcp_groups: Arc<Mutex<HashMap<String, TcpGroup>>>,
+    udp_groups: Arc<Mutex<HashMap<String, UdpGroup>>>,
     nathole: Arc<NatHoleController>,
     udp_relays: Arc<Mutex<HashMap<String, Arc<UdpSocket>>>>,
     proxy_entries: Arc<Mutex<HashMap<String, ProxyEntry>>>,
+    allow_ports: Arc<Mutex<Vec<String>>>,
     metrics: Arc<ServerMetrics>,
 }
 
 struct Control {
     run_id: String,
+    peer_addr: SocketAddr,
     pool_count: usize,
     writer: Mutex<WriteHalf<BoxStream>>,
     work_pool: WorkPool,
@@ -58,6 +71,13 @@ struct ProxyRoute {
     control: Arc<Control>,
     proxy_name: String,
     bandwidth_limit: Option<u64>,
+    group: Option<String>,
+    group_key: Option<String>,
+    locations: Vec<String>,
+    host_header_rewrite: Option<String>,
+    request_headers: HashMap<String, String>,
+    http_user: Option<String>,
+    http_password: Option<String>,
 }
 
 #[derive(Clone)]
@@ -68,13 +88,76 @@ struct StcpRoute {
     bandwidth_limit: Option<u64>,
 }
 
+struct StcpGroup {
+    group_name: String,
+    group_key: Option<String>,
+    sk: Option<String>,
+    routes: Vec<StcpRoute>,
+    next: usize,
+}
+
+#[derive(Clone)]
+struct SudpRoute {
+    control: Arc<Control>,
+    proxy_name: String,
+    sk: Option<String>,
+}
+
+#[derive(Clone)]
+struct TcpGroupRoute {
+    control: Arc<Control>,
+    proxy_name: String,
+    bandwidth_limit: Option<u64>,
+}
+
+struct TcpGroup {
+    group_name: String,
+    group_key: Option<String>,
+    remote_port: u16,
+    remote_addr: String,
+    routes: Vec<TcpGroupRoute>,
+    next: usize,
+    task: JoinHandle<()>,
+}
+
+#[derive(Clone)]
+struct UdpGroupRoute {
+    control: Arc<Control>,
+    proxy_name: String,
+}
+
+struct UdpGroup {
+    group_name: String,
+    group_key: Option<String>,
+    remote_port: u16,
+    remote_addr: String,
+    socket: Arc<UdpSocket>,
+    routes: Vec<UdpGroupRoute>,
+    next: usize,
+    task: JoinHandle<()>,
+}
+
 struct ProxyEntry {
     run_id: String,
     proxy_type: String,
+    group: Option<String>,
+    tcp_group_map_key: Option<String>,
+    udp_group_map_key: Option<String>,
     domains: Vec<String>,
     remote_addr: String,
     bandwidth_limit: Option<u64>,
+    health: Option<ProxyHealthStatus>,
+    started_unix_secs: u64,
     task: Option<JoinHandle<()>>,
+}
+
+#[derive(Clone)]
+struct ProxyHealthStatus {
+    healthy: bool,
+    check_type: String,
+    detail: String,
+    checked_unix_secs: u64,
+    updated_unix_secs: u64,
 }
 
 struct ServerMetrics {
@@ -154,20 +237,30 @@ impl WorkPool {
 }
 
 pub async fn run(cfg: ServerConfig) -> Result<()> {
+    let allow_ports = cfg.allow_ports.clone();
     let state = ServerState {
         cfg: Arc::new(cfg),
         controls: Arc::new(Mutex::new(HashMap::new())),
         http_routes: Arc::new(Mutex::new(HashMap::new())),
+        http_route_next: Arc::new(Mutex::new(HashMap::new())),
+        tcpmux_routes: Arc::new(Mutex::new(HashMap::new())),
+        tcpmux_route_next: Arc::new(Mutex::new(HashMap::new())),
         https_routes: Arc::new(Mutex::new(HashMap::new())),
+        https_route_next: Arc::new(Mutex::new(HashMap::new())),
         stcp_routes: Arc::new(Mutex::new(HashMap::new())),
+        stcp_groups: Arc::new(Mutex::new(HashMap::new())),
+        xtcp_routes: Arc::new(Mutex::new(HashMap::new())),
+        xtcp_groups: Arc::new(Mutex::new(HashMap::new())),
+        sudp_routes: Arc::new(Mutex::new(HashMap::new())),
+        sudp_sessions: Arc::new(Mutex::new(HashMap::new())),
+        tcp_groups: Arc::new(Mutex::new(HashMap::new())),
+        udp_groups: Arc::new(Mutex::new(HashMap::new())),
         nathole: Arc::new(NatHoleController::default()),
         udp_relays: Arc::new(Mutex::new(HashMap::new())),
         proxy_entries: Arc::new(Mutex::new(HashMap::new())),
+        allow_ports: Arc::new(Mutex::new(allow_ports)),
         metrics: Arc::new(ServerMetrics {
-            started_unix_secs: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            started_unix_secs: unix_now(),
             visitor_connections_total: AtomicU64::new(0),
             bytes_up_total: AtomicU64::new(0),
             bytes_down_total: AtomicU64::new(0),
@@ -202,6 +295,8 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
 
     match protocol {
         TransportProtocol::Tcp => run_tcp_control_listener(state).await,
+        TransportProtocol::Tls => run_tls_control_listener(state).await,
+        TransportProtocol::Websocket => run_websocket_control_listener(state).await,
         TransportProtocol::Kcp => run_kcp_control_listener(state).await,
         TransportProtocol::Quic => run_quic_control_listener(state).await,
     }
@@ -223,6 +318,73 @@ async fn run_tcp_control_listener(state: ServerState) -> Result<()> {
         tokio::spawn(async move {
             if let Err(err) = handle_connection(state, Box::new(stream), peer).await {
                 debug!("connection {peer} closed: {err:#}");
+            }
+        });
+    }
+}
+
+async fn run_tls_control_listener(state: ServerState) -> Result<()> {
+    let listener = bind_tcp_listener(&state.cfg.control_addr())
+        .await
+        .with_context(|| format!("listen frps tls control on {}", state.cfg.control_addr()))?;
+    let addr = listener
+        .local_addr()
+        .context("read frps tls listener address")?;
+    info!("frps tls control listening on {addr}");
+
+    loop {
+        let (stream, peer) = listener
+            .accept()
+            .await
+            .context("accept frps tls tcp connection")?;
+        configure_tcp_stream(&stream);
+        let state = state.clone();
+        tokio::spawn(async move {
+            let stream = match transports::tls::accept(stream).await {
+                Ok(stream) => stream,
+                Err(err) => {
+                    debug!("tls handshake from {peer} failed: {err:#}");
+                    return;
+                }
+            };
+            if let Err(err) = handle_connection(state, Box::new(stream), peer).await {
+                debug!("tls connection {peer} closed: {err:#}");
+            }
+        });
+    }
+}
+
+async fn run_websocket_control_listener(state: ServerState) -> Result<()> {
+    let listener = bind_tcp_listener(&state.cfg.control_addr())
+        .await
+        .with_context(|| {
+            format!(
+                "listen frps websocket control on {}",
+                state.cfg.control_addr()
+            )
+        })?;
+    let addr = listener
+        .local_addr()
+        .context("read frps websocket listener address")?;
+    info!("frps websocket control listening on {addr}");
+
+    loop {
+        let (stream, peer) = listener
+            .accept()
+            .await
+            .context("accept frps websocket tcp connection")?;
+        configure_tcp_stream(&stream);
+        let state = state.clone();
+        tokio::spawn(async move {
+            let stream = match transports::websocket::accept(stream).await {
+                Ok(stream) => stream,
+                Err(err) => {
+                    debug!("websocket upgrade from {peer} failed: {err:#}");
+                    return;
+                }
+            };
+            if let Err(err) = handle_connection(state, Box::new(stream), peer).await {
+                debug!("websocket connection {peer} closed: {err:#}");
             }
         });
     }
@@ -319,6 +481,7 @@ async fn handle_connection(
             call_plugin_hook(
                 state.cfg.plugins.login_url.as_deref(),
                 json!({
+                    "op": "Login",
                     "version": version,
                     "hostname": hostname,
                     "os": os,
@@ -363,6 +526,7 @@ async fn register_control(
     let (mut reader, writer) = tokio::io::split(stream);
     let control = Arc::new(Control {
         run_id: run_id.clone(),
+        peer_addr: peer,
         pool_count,
         writer: Mutex::new(writer),
         work_pool: WorkPool::new(),
@@ -388,7 +552,14 @@ async fn register_control(
                 proxy_name,
                 proxy_type,
                 remote_port,
+                group,
+                group_key,
                 custom_domains,
+                locations,
+                host_header_rewrite,
+                request_headers,
+                http_user,
+                http_password,
                 bandwidth_limit,
                 sk,
             }) => {
@@ -398,7 +569,14 @@ async fn register_control(
                     proxy_name.clone(),
                     proxy_type.clone(),
                     remote_port,
+                    group,
+                    group_key,
                     custom_domains,
+                    locations,
+                    host_header_rewrite,
+                    request_headers,
+                    http_user,
+                    http_password,
                     bandwidth_limit,
                     sk,
                 )
@@ -436,6 +614,44 @@ async fn register_control(
                     warn!("send udp packet for proxy {proxy_name} failed: {err:#}");
                 }
             }
+            Ok(Message::UdpPacketBatch { packets }) => {
+                for packet in packets {
+                    if let Err(err) = send_udp_packet_to_visitor(
+                        state.clone(),
+                        &packet.proxy_name,
+                        &packet.content,
+                        &packet.visitor_addr,
+                    )
+                    .await
+                    {
+                        warn!(
+                            "send udp packet batch item for proxy {} failed: {err:#}",
+                            packet.proxy_name
+                        );
+                    }
+                }
+            }
+            Ok(Message::SudpPacket {
+                proxy_name,
+                session_id,
+                content,
+                sk,
+                from_visitor,
+            }) => {
+                if let Err(err) = handle_sudp_packet(
+                    state.clone(),
+                    control.clone(),
+                    proxy_name,
+                    session_id,
+                    content,
+                    sk,
+                    from_visitor,
+                )
+                .await
+                {
+                    warn!("sudp packet handling failed: {err:#}");
+                }
+            }
             Ok(Message::NatHoleRegister {
                 transaction_id,
                 proxy_name,
@@ -460,6 +676,23 @@ async fn register_control(
                 } else {
                     debug!("close_proxy ignored for unknown proxy {proxy_name}");
                 }
+            }
+            Ok(Message::HealthStatus {
+                proxy_name,
+                healthy,
+                check_type,
+                detail,
+                checked_unix_secs,
+            }) => {
+                update_proxy_health(
+                    state.clone(),
+                    &proxy_name,
+                    healthy,
+                    check_type,
+                    detail,
+                    checked_unix_secs,
+                )
+                .await;
             }
             Ok(other) => {
                 warn!("ignored unsupported control message: {other:?}");
@@ -552,9 +785,29 @@ async fn handle_stcp_visitor_conn(
     proxy_name: String,
     sk: Option<String>,
 ) -> Result<()> {
-    let route = {
+    let direct_route = {
         let routes = state.stcp_routes.lock().await;
         routes.get(&proxy_name).cloned()
+    };
+    let route = match direct_route {
+        Some(route) => Some(route),
+        None => {
+            let direct_xtcp_route = {
+                let routes = state.xtcp_routes.lock().await;
+                routes.get(&proxy_name).cloned()
+            };
+            match direct_xtcp_route {
+                Some(route) => Some(route),
+                None => {
+                    match next_private_tcp_group_route(state.clone(), "stcp", &proxy_name).await {
+                        Some(route) => Some(route),
+                        None => {
+                            next_private_tcp_group_route(state.clone(), "xtcp", &proxy_name).await
+                        }
+                    }
+                }
+            }
+        }
     };
 
     let Some(route) = route else {
@@ -612,7 +865,14 @@ async fn start_proxy(
     proxy_name: String,
     proxy_type: String,
     remote_port: u16,
+    group: Option<String>,
+    group_key: Option<String>,
     custom_domains: Vec<String>,
+    locations: Vec<String>,
+    host_header_rewrite: Option<String>,
+    request_headers: HashMap<String, String>,
+    http_user: Option<String>,
+    http_password: Option<String>,
     bandwidth_limit: Option<String>,
     sk: Option<String>,
 ) -> Result<String> {
@@ -620,11 +880,17 @@ async fn start_proxy(
     call_plugin_hook(
         state.cfg.plugins.new_proxy_url.as_deref(),
         json!({
+            "op": "NewProxy",
             "run_id": control.run_id,
             "proxy_name": proxy_name,
             "proxy_type": proxy_type,
             "remote_port": remote_port,
+            "group": group,
             "custom_domains": custom_domains,
+            "locations": locations,
+            "host_header_rewrite": host_header_rewrite,
+            "request_headers": request_headers,
+            "http_user": http_user,
             "bandwidth_limit": bandwidth_limit,
             "sk": sk,
         }),
@@ -637,20 +903,119 @@ async fn start_proxy(
         .with_context(|| format!("parse bandwidthLimit for proxy {proxy_name}"))?;
 
     match proxy_type.as_str() {
-        "tcp" => start_tcp_proxy(state, control, proxy_name, remote_port, bandwidth_limit).await,
-        "udp" => start_udp_proxy(state, control, proxy_name, remote_port).await,
+        "tcp" => {
+            if let Some(group) = group {
+                start_tcp_group_proxy(
+                    state,
+                    control,
+                    proxy_name,
+                    remote_port,
+                    group,
+                    group_key,
+                    bandwidth_limit,
+                )
+                .await
+            } else {
+                start_tcp_proxy(state, control, proxy_name, remote_port, bandwidth_limit).await
+            }
+        }
+        "udp" => {
+            if let Some(group) = group {
+                start_udp_group_proxy(state, control, proxy_name, remote_port, group, group_key)
+                    .await
+            } else {
+                start_udp_proxy(state, control, proxy_name, remote_port).await
+            }
+        }
         "http" => {
-            start_http_proxy(state, control, proxy_name, custom_domains, bandwidth_limit).await
+            start_http_proxy(
+                state,
+                control,
+                proxy_name,
+                custom_domains,
+                group,
+                group_key,
+                locations,
+                host_header_rewrite,
+                request_headers,
+                http_user,
+                http_password,
+                bandwidth_limit,
+            )
+            .await
         }
         "https" => {
-            start_https_proxy(state, control, proxy_name, custom_domains, bandwidth_limit).await
+            start_https_proxy(
+                state,
+                control,
+                proxy_name,
+                custom_domains,
+                group,
+                group_key,
+                bandwidth_limit,
+            )
+            .await
         }
-        "stcp" => start_stcp_proxy(state, control, proxy_name, sk, bandwidth_limit).await,
-        "sudp" | "xtcp" => bail!(
-            "proxy type {proxy_type} is recognized but UDP visitor/P2P routing is not implemented yet"
-        ),
+        "tcpmux" => {
+            start_tcpmux_proxy(
+                state,
+                control,
+                proxy_name,
+                custom_domains,
+                group,
+                group_key,
+                bandwidth_limit,
+            )
+            .await
+        }
+        "stcp" => {
+            start_stcp_proxy(
+                state,
+                control,
+                proxy_name,
+                group,
+                group_key,
+                sk,
+                bandwidth_limit,
+            )
+            .await
+        }
+        "sudp" => start_sudp_proxy(state, control, proxy_name, sk, bandwidth_limit).await,
+        "xtcp" => {
+            start_xtcp_proxy(
+                state,
+                control,
+                proxy_name,
+                group,
+                group_key,
+                sk,
+                bandwidth_limit,
+            )
+            .await
+        }
         _ => bail!("proxy type {proxy_type} is not implemented"),
     }
+}
+
+fn ensure_remote_port_allowed(
+    allow_ports: &[String],
+    proxy_name: &str,
+    remote_port: u16,
+) -> Result<()> {
+    if remote_port == 0 || remote_port_allowed(allow_ports, remote_port)? {
+        return Ok(());
+    }
+
+    bail!("remotePort {remote_port} for proxy {proxy_name} is not allowed by allowPorts")
+}
+
+async fn ensure_state_remote_port_allowed(
+    state: &ServerState,
+    proxy_name: &str,
+    remote_port: u16,
+) -> Result<()> {
+    let allow_ports = state.allow_ports.lock().await;
+    ensure_remote_port_allowed(&allow_ports, proxy_name, remote_port)
 }
 
 async fn start_tcp_proxy(
@@ -660,6 +1025,7 @@ async fn start_tcp_proxy(
     remote_port: u16,
     bandwidth_limit: Option<u64>,
 ) -> Result<String> {
+    ensure_state_remote_port_allowed(&state, &proxy_name, remote_port).await?;
     let bind_addr = format!("{}:{}", state.cfg.proxy_bind_addr, remote_port);
     let listener = bind_tcp_listener(&bind_addr)
         .await
@@ -711,14 +1077,162 @@ async fn start_tcp_proxy(
         ProxyEntry {
             run_id,
             proxy_type: "tcp".to_string(),
+            group: None,
+            tcp_group_map_key: None,
+            udp_group_map_key: None,
             domains: Vec::new(),
             remote_addr: remote_addr.clone(),
             bandwidth_limit,
+            health: None,
+            started_unix_secs: unix_now(),
             task: Some(task),
         },
     );
 
     Ok(remote_addr)
+}
+
+async fn start_tcp_group_proxy(
+    state: ServerState,
+    control: Arc<Control>,
+    proxy_name: String,
+    remote_port: u16,
+    group: String,
+    group_key: Option<String>,
+    bandwidth_limit: Option<u64>,
+) -> Result<String> {
+    ensure_state_remote_port_allowed(&state, &proxy_name, remote_port).await?;
+    if group.trim().is_empty() {
+        bail!("tcp proxy {proxy_name} has empty group");
+    }
+
+    let map_key = group_map_key(remote_port, &group);
+    let route = TcpGroupRoute {
+        control: control.clone(),
+        proxy_name: proxy_name.clone(),
+        bandwidth_limit,
+    };
+
+    let remote_addr = {
+        let mut groups = state.tcp_groups.lock().await;
+        if let Some(existing) = groups.get_mut(&map_key) {
+            if existing.group_key != group_key {
+                bail!("tcp group {group} remotePort {remote_port} groupKey mismatch");
+            }
+            if existing
+                .routes
+                .iter()
+                .any(|route| route.proxy_name == proxy_name)
+            {
+                bail!("tcp group {group} already contains proxy {proxy_name}");
+            }
+            existing.routes.push(route);
+            existing.remote_addr.clone()
+        } else {
+            let bind_addr = format!("{}:{}", state.cfg.proxy_bind_addr, remote_port);
+            let listener = bind_tcp_listener(&bind_addr)
+                .await
+                .with_context(|| format!("listen tcp group {group} on {bind_addr}"))?;
+            let remote_addr = listener
+                .local_addr()
+                .map(|addr| addr.to_string())
+                .unwrap_or(bind_addr);
+            let task_state = state.clone();
+            let task_key = map_key.clone();
+            let task_group = group.clone();
+            let metrics = state.metrics.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    match listener.accept().await {
+                        Ok((visitor, visitor_addr)) => {
+                            configure_tcp_stream(&visitor);
+                            let route = match next_tcp_group_route(task_state.clone(), &task_key)
+                                .await
+                            {
+                                Some(route) => route,
+                                None => {
+                                    debug!(
+                                        "tcp group {task_group} has no available route for {visitor_addr}"
+                                    );
+                                    continue;
+                                }
+                            };
+                            let metrics = metrics.clone();
+                            metrics
+                                .visitor_connections_total
+                                .fetch_add(1, Ordering::Relaxed);
+                            tokio::spawn(async move {
+                                if let Err(err) = handle_tcp_visitor(
+                                    route.control,
+                                    metrics,
+                                    route.proxy_name.clone(),
+                                    visitor,
+                                    visitor_addr,
+                                    route.bandwidth_limit,
+                                )
+                                .await
+                                {
+                                    warn!(
+                                        "tcp group route {} visitor {visitor_addr} failed: {err:#}",
+                                        route.proxy_name
+                                    );
+                                }
+                            });
+                        }
+                        Err(err) => {
+                            error!("tcp group listener {task_group} failed: {err:#}");
+                            break;
+                        }
+                    }
+                }
+            });
+
+            info!("tcp group {group} listening on {remote_addr}");
+            groups.insert(
+                map_key.clone(),
+                TcpGroup {
+                    group_name: group.clone(),
+                    group_key: group_key.clone(),
+                    remote_port,
+                    remote_addr: remote_addr.clone(),
+                    routes: vec![route],
+                    next: 0,
+                    task,
+                },
+            );
+            remote_addr
+        }
+    };
+
+    state.proxy_entries.lock().await.insert(
+        proxy_name,
+        ProxyEntry {
+            run_id: control.run_id.clone(),
+            proxy_type: "tcp".to_string(),
+            group: Some(group),
+            tcp_group_map_key: Some(map_key),
+            udp_group_map_key: None,
+            domains: Vec::new(),
+            remote_addr: remote_addr.clone(),
+            bandwidth_limit,
+            health: None,
+            started_unix_secs: unix_now(),
+            task: None,
+        },
+    );
+
+    Ok(remote_addr)
+}
+
+async fn next_tcp_group_route(state: ServerState, map_key: &str) -> Option<TcpGroupRoute> {
+    let mut groups = state.tcp_groups.lock().await;
+    let group = groups.get_mut(map_key)?;
+    if group.routes.is_empty() {
+        return None;
+    }
+    let index = group.next % group.routes.len();
+    group.next = group.next.wrapping_add(1);
+    group.routes.get(index).cloned()
 }
 
 async fn start_udp_proxy(
@@ -727,6 +1241,7 @@ async fn start_udp_proxy(
     proxy_name: String,
     remote_port: u16,
 ) -> Result<String> {
+    ensure_state_remote_port_allowed(&state, &proxy_name, remote_port).await?;
     let bind_addr = format!("{}:{}", state.cfg.proxy_bind_addr, remote_port);
     let socket = Arc::new(
         UdpSocket::bind(&bind_addr)
@@ -748,6 +1263,37 @@ async fn start_udp_proxy(
     let run_id = control.run_id.clone();
     let task_proxy_name = proxy_name.clone();
     let metrics = state.metrics.clone();
+    let (packet_tx, mut packet_rx) = mpsc::channel::<UdpPacketFrame>(128);
+    let batch_control = control.clone();
+    let batch_proxy_name = proxy_name.clone();
+    tokio::spawn(async move {
+        while let Some(first) = packet_rx.recv().await {
+            let mut packets = vec![first];
+            time::sleep(Duration::from_millis(2)).await;
+            while packets.len() < 32 {
+                let Ok(packet) = packet_rx.try_recv() else {
+                    break;
+                };
+                packets.push(packet);
+            }
+
+            let msg = if packets.len() == 1 {
+                let packet = packets.pop().expect("batch has one packet");
+                Message::UdpPacket {
+                    proxy_name: packet.proxy_name,
+                    content: packet.content,
+                    visitor_addr: packet.visitor_addr,
+                }
+            } else {
+                Message::UdpPacketBatch { packets }
+            };
+
+            if let Err(err) = batch_control.send(&msg).await {
+                warn!("udp proxy {batch_proxy_name} failed to forward packet batch to client: {err:#}");
+                break;
+            }
+        }
+    });
     let task = tokio::spawn(async move {
         let mut buf = vec![0_u8; 64 * 1024];
         loop {
@@ -759,13 +1305,13 @@ async fn start_udp_proxy(
                     metrics
                         .bytes_up_total
                         .fetch_add(n as u64, Ordering::Relaxed);
-                    let msg = Message::UdpPacket {
+                    let packet = UdpPacketFrame {
                         proxy_name: task_proxy_name.clone(),
                         content: buf[..n].to_vec(),
                         visitor_addr: visitor_addr.to_string(),
                     };
-                    if let Err(err) = control.send(&msg).await {
-                        warn!("udp proxy {task_proxy_name} failed to forward packet to client: {err:#}");
+                    if let Err(err) = packet_tx.send(packet).await {
+                        warn!("udp proxy {task_proxy_name} failed to queue packet batch: {err:#}");
                         break;
                     }
                 }
@@ -781,14 +1327,171 @@ async fn start_udp_proxy(
         ProxyEntry {
             run_id,
             proxy_type: "udp".to_string(),
+            group: None,
+            tcp_group_map_key: None,
+            udp_group_map_key: None,
             domains: Vec::new(),
             remote_addr: remote_addr.clone(),
             bandwidth_limit: None,
+            health: None,
+            started_unix_secs: unix_now(),
             task: Some(task),
         },
     );
 
     Ok(remote_addr)
+}
+
+async fn start_udp_group_proxy(
+    state: ServerState,
+    control: Arc<Control>,
+    proxy_name: String,
+    remote_port: u16,
+    group: String,
+    group_key: Option<String>,
+) -> Result<String> {
+    ensure_state_remote_port_allowed(&state, &proxy_name, remote_port).await?;
+    if group.trim().is_empty() {
+        bail!("udp proxy {proxy_name} has empty group");
+    }
+
+    let map_key = group_map_key(remote_port, &group);
+    let route = UdpGroupRoute {
+        control: control.clone(),
+        proxy_name: proxy_name.clone(),
+    };
+
+    let remote_addr = {
+        let mut groups = state.udp_groups.lock().await;
+        if let Some(existing) = groups.get_mut(&map_key) {
+            if existing.group_key != group_key {
+                bail!("udp group {group} remotePort {remote_port} groupKey mismatch");
+            }
+            if existing
+                .routes
+                .iter()
+                .any(|route| route.proxy_name == proxy_name)
+            {
+                bail!("udp group {group} already contains proxy {proxy_name}");
+            }
+            state
+                .udp_relays
+                .lock()
+                .await
+                .insert(proxy_name.clone(), existing.socket.clone());
+            existing.routes.push(route);
+            existing.remote_addr.clone()
+        } else {
+            let bind_addr = format!("{}:{}", state.cfg.proxy_bind_addr, remote_port);
+            let socket = Arc::new(
+                UdpSocket::bind(&bind_addr)
+                    .await
+                    .with_context(|| format!("listen udp group {group} on {bind_addr}"))?,
+            );
+            let remote_addr = socket
+                .local_addr()
+                .map(|addr| addr.to_string())
+                .unwrap_or(bind_addr);
+            state
+                .udp_relays
+                .lock()
+                .await
+                .insert(proxy_name.clone(), socket.clone());
+
+            let task_state = state.clone();
+            let task_key = map_key.clone();
+            let task_group = group.clone();
+            let task_socket = socket.clone();
+            let metrics = state.metrics.clone();
+            let task = tokio::spawn(async move {
+                let mut buf = vec![0_u8; 64 * 1024];
+                loop {
+                    match task_socket.recv_from(&mut buf).await {
+                        Ok((n, visitor_addr)) => {
+                            metrics
+                                .visitor_connections_total
+                                .fetch_add(1, Ordering::Relaxed);
+                            metrics
+                                .bytes_up_total
+                                .fetch_add(n as u64, Ordering::Relaxed);
+                            let route = match next_udp_group_route(task_state.clone(), &task_key)
+                                .await
+                            {
+                                Some(route) => route,
+                                None => {
+                                    debug!(
+                                        "udp group {task_group} has no available route for {visitor_addr}"
+                                    );
+                                    continue;
+                                }
+                            };
+                            let msg = Message::UdpPacket {
+                                proxy_name: route.proxy_name.clone(),
+                                content: buf[..n].to_vec(),
+                                visitor_addr: visitor_addr.to_string(),
+                            };
+                            if let Err(err) = route.control.send(&msg).await {
+                                warn!(
+                                    "udp group route {} failed to forward packet to client: {err:#}",
+                                    route.proxy_name
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            warn!("udp group listener {task_group} failed: {err:#}");
+                            break;
+                        }
+                    }
+                }
+            });
+
+            info!("udp group {group} listening on {remote_addr}");
+            groups.insert(
+                map_key.clone(),
+                UdpGroup {
+                    group_name: group.clone(),
+                    group_key: group_key.clone(),
+                    remote_port,
+                    remote_addr: remote_addr.clone(),
+                    socket,
+                    routes: vec![route],
+                    next: 0,
+                    task,
+                },
+            );
+            remote_addr
+        }
+    };
+
+    state.proxy_entries.lock().await.insert(
+        proxy_name,
+        ProxyEntry {
+            run_id: control.run_id.clone(),
+            proxy_type: "udp".to_string(),
+            group: Some(group),
+            tcp_group_map_key: None,
+            udp_group_map_key: Some(map_key),
+            domains: Vec::new(),
+            remote_addr: remote_addr.clone(),
+            bandwidth_limit: None,
+            health: None,
+            started_unix_secs: unix_now(),
+            task: None,
+        },
+    );
+
+    Ok(remote_addr)
+}
+
+async fn next_udp_group_route(state: ServerState, map_key: &str) -> Option<UdpGroupRoute> {
+    let mut groups = state.udp_groups.lock().await;
+    let group = groups.get_mut(map_key)?;
+    if group.routes.is_empty() {
+        return None;
+    }
+    let index = group.next % group.routes.len();
+    group.next = group.next.wrapping_add(1);
+    group.routes.get(index).cloned()
 }
 
 async fn send_udp_packet_to_visitor(
@@ -818,11 +1521,84 @@ async fn send_udp_packet_to_visitor(
     Ok(())
 }
 
+async fn handle_sudp_packet(
+    state: ServerState,
+    control: Arc<Control>,
+    proxy_name: String,
+    session_id: String,
+    content: Vec<u8>,
+    sk: Option<String>,
+    from_visitor: bool,
+) -> Result<()> {
+    if from_visitor {
+        let content_len = content.len() as u64;
+        let route = {
+            let routes = state.sudp_routes.lock().await;
+            routes
+                .get(&proxy_name)
+                .cloned()
+                .ok_or_else(|| anyhow!("unknown sudp proxy {proxy_name}"))?
+        };
+        if route.sk != sk {
+            bail!("sudp secret key mismatch for proxy {proxy_name}");
+        }
+        state
+            .sudp_sessions
+            .lock()
+            .await
+            .insert((proxy_name.clone(), session_id.clone()), control);
+        route
+            .control
+            .send(&Message::SudpPacket {
+                proxy_name: route.proxy_name,
+                session_id,
+                content,
+                sk: None,
+                from_visitor: true,
+            })
+            .await?;
+        state
+            .metrics
+            .bytes_up_total
+            .fetch_add(content_len, Ordering::Relaxed);
+    } else {
+        let content_len = content.len() as u64;
+        let visitor_control = {
+            let sessions = state.sudp_sessions.lock().await;
+            sessions
+                .get(&(proxy_name.clone(), session_id.clone()))
+                .cloned()
+                .ok_or_else(|| anyhow!("unknown sudp session {proxy_name}/{session_id}"))?
+        };
+        visitor_control
+            .send(&Message::SudpPacket {
+                proxy_name,
+                session_id,
+                content,
+                sk: None,
+                from_visitor: false,
+            })
+            .await?;
+        state
+            .metrics
+            .bytes_down_total
+            .fetch_add(content_len, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
 async fn start_http_proxy(
     state: ServerState,
     control: Arc<Control>,
     proxy_name: String,
     custom_domains: Vec<String>,
+    group: Option<String>,
+    group_key: Option<String>,
+    locations: Vec<String>,
+    host_header_rewrite: Option<String>,
+    request_headers: HashMap<String, String>,
+    http_user: Option<String>,
+    http_password: Option<String>,
     bandwidth_limit: Option<u64>,
 ) -> Result<String> {
     if state.cfg.vhost_http_port == 0 {
@@ -836,10 +1612,19 @@ async fn start_http_proxy(
         control: control.clone(),
         proxy_name: proxy_name.clone(),
         bandwidth_limit,
+        group: group.clone(),
+        group_key: group_key.clone(),
+        locations: normalize_locations(&locations),
+        host_header_rewrite,
+        request_headers,
+        http_user,
+        http_password,
     };
     let mut routes = state.http_routes.lock().await;
     for domain in &custom_domains {
-        routes.insert(normalize_host(domain), route.clone());
+        let domain_routes = routes.entry(normalize_host(domain)).or_default();
+        ensure_http_group_key_matches(domain_routes, &route)?;
+        domain_routes.push(route.clone());
     }
 
     let first = &custom_domains[0];
@@ -850,9 +1635,14 @@ async fn start_http_proxy(
         ProxyEntry {
             run_id: control.run_id.clone(),
             proxy_type: "http".to_string(),
+            group,
+            tcp_group_map_key: None,
+            udp_group_map_key: None,
             domains: custom_domains,
             remote_addr: remote_addr.clone(),
             bandwidth_limit,
+            health: None,
+            started_unix_secs: unix_now(),
             task: None,
         },
     );
@@ -864,6 +1654,8 @@ async fn start_https_proxy(
     control: Arc<Control>,
     proxy_name: String,
     custom_domains: Vec<String>,
+    group: Option<String>,
+    group_key: Option<String>,
     bandwidth_limit: Option<u64>,
 ) -> Result<String> {
     if state.cfg.vhost_https_port == 0 {
@@ -877,10 +1669,19 @@ async fn start_https_proxy(
         control: control.clone(),
         proxy_name: proxy_name.clone(),
         bandwidth_limit,
+        group: group.clone(),
+        group_key: group_key.clone(),
+        locations: Vec::new(),
+        host_header_rewrite: None,
+        request_headers: HashMap::new(),
+        http_user: None,
+        http_password: None,
     };
     let mut routes = state.https_routes.lock().await;
     for domain in &custom_domains {
-        routes.insert(normalize_host(domain), route.clone());
+        let domain_routes = routes.entry(normalize_host(domain)).or_default();
+        ensure_http_group_key_matches(domain_routes, &route)?;
+        domain_routes.push(route.clone());
     }
 
     let first = &custom_domains[0];
@@ -891,9 +1692,71 @@ async fn start_https_proxy(
         ProxyEntry {
             run_id: control.run_id.clone(),
             proxy_type: "https".to_string(),
+            group,
+            tcp_group_map_key: None,
+            udp_group_map_key: None,
             domains: custom_domains,
             remote_addr: remote_addr.clone(),
             bandwidth_limit,
+            health: None,
+            started_unix_secs: unix_now(),
+            task: None,
+        },
+    );
+    Ok(remote_addr)
+}
+
+async fn start_tcpmux_proxy(
+    state: ServerState,
+    control: Arc<Control>,
+    proxy_name: String,
+    custom_domains: Vec<String>,
+    group: Option<String>,
+    group_key: Option<String>,
+    bandwidth_limit: Option<u64>,
+) -> Result<String> {
+    if state.cfg.vhost_http_port == 0 {
+        bail!("vhostHTTPPort must be configured on frps for tcpmux proxies");
+    }
+    if custom_domains.is_empty() {
+        bail!("tcpmux proxy {proxy_name} needs customDomains");
+    }
+
+    let route = ProxyRoute {
+        control: control.clone(),
+        proxy_name: proxy_name.clone(),
+        bandwidth_limit,
+        group: group.clone(),
+        group_key: group_key.clone(),
+        locations: Vec::new(),
+        host_header_rewrite: None,
+        request_headers: HashMap::new(),
+        http_user: None,
+        http_password: None,
+    };
+    let mut routes = state.tcpmux_routes.lock().await;
+    for domain in &custom_domains {
+        let domain_routes = routes.entry(normalize_host(domain)).or_default();
+        ensure_http_group_key_matches(domain_routes, &route)?;
+        domain_routes.push(route.clone());
+    }
+
+    let first = &custom_domains[0];
+    let remote_addr = format!("tcpmux://{}:{}", first, state.cfg.vhost_http_port);
+    info!("tcpmux proxy {proxy_name} registered for domains {custom_domains:?}");
+    state.proxy_entries.lock().await.insert(
+        proxy_name,
+        ProxyEntry {
+            run_id: control.run_id.clone(),
+            proxy_type: "tcpmux".to_string(),
+            group,
+            tcp_group_map_key: None,
+            udp_group_map_key: None,
+            domains: custom_domains,
+            remote_addr: remote_addr.clone(),
+            bandwidth_limit,
+            health: None,
+            started_unix_secs: unix_now(),
             task: None,
         },
     );
@@ -904,32 +1767,230 @@ async fn start_stcp_proxy(
     state: ServerState,
     control: Arc<Control>,
     proxy_name: String,
+    group: Option<String>,
+    group_key: Option<String>,
     sk: Option<String>,
     bandwidth_limit: Option<u64>,
 ) -> Result<String> {
-    let remote_addr = format!("stcp://{proxy_name}");
     let route = StcpRoute {
         control: control.clone(),
         proxy_name: proxy_name.clone(),
-        sk,
+        sk: sk.clone(),
         bandwidth_limit,
     };
 
-    state
-        .stcp_routes
-        .lock()
-        .await
-        .insert(proxy_name.clone(), route);
-    info!("stcp proxy {proxy_name} registered");
+    let remote_addr = if let Some(group_name) = group.clone() {
+        if group_name.trim().is_empty() {
+            bail!("stcp proxy {proxy_name} has empty group");
+        }
+        let group_name = group_name.trim().to_string();
+        let mut groups = state.stcp_groups.lock().await;
+        if let Some(existing) = groups.get_mut(&group_name) {
+            if existing.group_key != group_key {
+                bail!("stcp group {group_name} groupKey mismatch");
+            }
+            if existing.sk != sk {
+                bail!("stcp group {group_name} sk mismatch");
+            }
+            if existing
+                .routes
+                .iter()
+                .any(|route| route.proxy_name == proxy_name)
+            {
+                bail!("stcp group {group_name} already contains proxy {proxy_name}");
+            }
+            existing.routes.push(route);
+        } else {
+            groups.insert(
+                group_name.clone(),
+                StcpGroup {
+                    group_name: group_name.clone(),
+                    group_key,
+                    sk,
+                    routes: vec![route],
+                    next: 0,
+                },
+            );
+        }
+        info!("stcp proxy {proxy_name} registered in group {group_name}");
+        format!("stcp://{group_name}")
+    } else {
+        let remote_addr = format!("stcp://{proxy_name}");
+        state
+            .stcp_routes
+            .lock()
+            .await
+            .insert(proxy_name.clone(), route);
+        info!("stcp proxy {proxy_name} registered");
+        remote_addr
+    };
 
     state.proxy_entries.lock().await.insert(
         proxy_name,
         ProxyEntry {
             run_id: control.run_id.clone(),
             proxy_type: "stcp".to_string(),
+            group,
+            tcp_group_map_key: None,
+            udp_group_map_key: None,
             domains: Vec::new(),
             remote_addr: remote_addr.clone(),
             bandwidth_limit,
+            health: None,
+            started_unix_secs: unix_now(),
+            task: None,
+        },
+    );
+    Ok(remote_addr)
+}
+
+async fn start_xtcp_proxy(
+    state: ServerState,
+    control: Arc<Control>,
+    proxy_name: String,
+    group: Option<String>,
+    group_key: Option<String>,
+    sk: Option<String>,
+    bandwidth_limit: Option<u64>,
+) -> Result<String> {
+    let route = StcpRoute {
+        control: control.clone(),
+        proxy_name: proxy_name.clone(),
+        sk: sk.clone(),
+        bandwidth_limit,
+    };
+
+    let remote_addr = if let Some(group_name) = group.clone() {
+        if group_name.trim().is_empty() {
+            bail!("xtcp proxy {proxy_name} has empty group");
+        }
+        let group_name = group_name.trim().to_string();
+        let mut groups = state.xtcp_groups.lock().await;
+        if let Some(existing) = groups.get_mut(&group_name) {
+            if existing.group_key != group_key {
+                bail!("xtcp group {group_name} groupKey mismatch");
+            }
+            if existing.sk != sk {
+                bail!("xtcp group {group_name} sk mismatch");
+            }
+            if existing
+                .routes
+                .iter()
+                .any(|route| route.proxy_name == proxy_name)
+            {
+                bail!("xtcp group {group_name} already contains proxy {proxy_name}");
+            }
+            existing.routes.push(route);
+        } else {
+            groups.insert(
+                group_name.clone(),
+                StcpGroup {
+                    group_name: group_name.clone(),
+                    group_key,
+                    sk,
+                    routes: vec![route],
+                    next: 0,
+                },
+            );
+        }
+        info!("xtcp proxy {proxy_name} registered in relay group {group_name}");
+        format!("xtcp://{group_name}")
+    } else {
+        let remote_addr = format!("xtcp://{proxy_name}");
+        state
+            .xtcp_routes
+            .lock()
+            .await
+            .insert(proxy_name.clone(), route);
+        info!("xtcp proxy {proxy_name} registered with server-relayed fallback");
+        remote_addr
+    };
+
+    state.proxy_entries.lock().await.insert(
+        proxy_name,
+        ProxyEntry {
+            run_id: control.run_id.clone(),
+            proxy_type: "xtcp".to_string(),
+            group,
+            tcp_group_map_key: None,
+            udp_group_map_key: None,
+            domains: Vec::new(),
+            remote_addr: remote_addr.clone(),
+            bandwidth_limit,
+            health: None,
+            started_unix_secs: unix_now(),
+            task: None,
+        },
+    );
+    Ok(remote_addr)
+}
+
+async fn next_stcp_group_route(state: ServerState, group_name: &str) -> Option<StcpRoute> {
+    let mut groups = state.stcp_groups.lock().await;
+    let group = groups.get_mut(group_name)?;
+    if group.routes.is_empty() {
+        return None;
+    }
+    let index = group.next % group.routes.len();
+    group.next = group.next.wrapping_add(1);
+    group.routes.get(index).cloned()
+}
+
+async fn next_private_tcp_group_route(
+    state: ServerState,
+    protocol: &str,
+    group_name: &str,
+) -> Option<StcpRoute> {
+    match protocol {
+        "stcp" => next_stcp_group_route(state, group_name).await,
+        "xtcp" => {
+            let mut groups = state.xtcp_groups.lock().await;
+            let group = groups.get_mut(group_name)?;
+            if group.routes.is_empty() {
+                return None;
+            }
+            let index = group.next % group.routes.len();
+            group.next = group.next.wrapping_add(1);
+            group.routes.get(index).cloned()
+        }
+        _ => None,
+    }
+}
+
+async fn start_sudp_proxy(
+    state: ServerState,
+    control: Arc<Control>,
+    proxy_name: String,
+    sk: Option<String>,
+    bandwidth_limit: Option<u64>,
+) -> Result<String> {
+    let remote_addr = format!("sudp://{proxy_name}");
+    let route = SudpRoute {
+        control: control.clone(),
+        proxy_name: proxy_name.clone(),
+        sk,
+    };
+
+    state
+        .sudp_routes
+        .lock()
+        .await
+        .insert(proxy_name.clone(), route);
+    info!("sudp proxy {proxy_name} registered");
+
+    state.proxy_entries.lock().await.insert(
+        proxy_name,
+        ProxyEntry {
+            run_id: control.run_id.clone(),
+            proxy_type: "sudp".to_string(),
+            group: None,
+            tcp_group_map_key: None,
+            udp_group_map_key: None,
+            domains: Vec::new(),
+            remote_addr: remote_addr.clone(),
+            bandwidth_limit,
+            health: None,
+            started_unix_secs: unix_now(),
             task: None,
         },
     );
@@ -1026,12 +2087,164 @@ async fn handle_dashboard_request(state: ServerState, mut stream: TcpStream) -> 
         .ok()
         .and_then(|text| text.lines().next())
         .unwrap_or_default();
+    let method = request_line.split_whitespace().next().unwrap_or("GET");
     let path = request_line.split_whitespace().nth(1).unwrap_or("/");
 
-    if path == "/api/status" {
-        let body = dashboard_status_json(&state).await?.to_string();
-        write_http_response(&mut stream, "200 OK", "application/json", body.as_bytes()).await?;
-        return Ok(());
+    match (method, path) {
+        ("GET", "/api/status") => {
+            let body = dashboard_status_json(&state).await?.to_string();
+            write_http_response(&mut stream, "200 OK", "application/json", body.as_bytes()).await?;
+            return Ok(());
+        }
+        ("GET", "/api/clients") => {
+            let body = client_list_json(&state).await?.to_string();
+            write_http_response(&mut stream, "200 OK", "application/json", body.as_bytes()).await?;
+            return Ok(());
+        }
+        ("GET", "/api/proxies") => {
+            let body = proxy_list_json(&state).await?.to_string();
+            write_http_response(&mut stream, "200 OK", "application/json", body.as_bytes()).await?;
+            return Ok(());
+        }
+        ("GET", "/api/groups") => {
+            let body = tcp_group_list_json(&state).await?.to_string();
+            write_http_response(&mut stream, "200 OK", "application/json", body.as_bytes()).await?;
+            return Ok(());
+        }
+        ("GET", "/api/metrics") => {
+            let body = metrics_json(&state).to_string();
+            write_http_response(&mut stream, "200 OK", "application/json", body.as_bytes()).await?;
+            return Ok(());
+        }
+        ("POST", "/api/metrics/reset") => {
+            if !dashboard_admin_authorized(&state, &prefix) {
+                write_http_response(
+                    &mut stream,
+                    "401 Unauthorized",
+                    "application/json",
+                    br#"{"error":"unauthorized"}"#,
+                )
+                .await?;
+                return Ok(());
+            }
+            reset_metrics(&state);
+            let body = metrics_json(&state).to_string();
+            write_http_response(&mut stream, "200 OK", "application/json", body.as_bytes()).await?;
+            return Ok(());
+        }
+        ("GET", "/api/config/allow_ports") => {
+            let body = allow_ports_json(&state).await.to_string();
+            write_http_response(&mut stream, "200 OK", "application/json", body.as_bytes()).await?;
+            return Ok(());
+        }
+        ("POST", "/api/config/allow_ports") | ("PUT", "/api/config/allow_ports") => {
+            if !dashboard_admin_authorized(&state, &prefix) {
+                write_http_response(
+                    &mut stream,
+                    "401 Unauthorized",
+                    "application/json",
+                    br#"{"error":"unauthorized"}"#,
+                )
+                .await?;
+                return Ok(());
+            }
+
+            let body = read_http_body(&mut stream, &prefix).await?;
+            let allow_ports = parse_allow_ports_update(&body)?;
+            validate_allow_ports(&allow_ports)?;
+            *state.allow_ports.lock().await = allow_ports.clone();
+            let body = json!({
+                "allow_ports": allow_ports,
+            })
+            .to_string();
+            write_http_response(&mut stream, "200 OK", "application/json", body.as_bytes()).await?;
+            return Ok(());
+        }
+        ("POST", _) | ("DELETE", _) => {
+            if let Some(run_id) = admin_close_client_run_id(method, path) {
+                if !dashboard_admin_authorized(&state, &prefix) {
+                    write_http_response(
+                        &mut stream,
+                        "401 Unauthorized",
+                        "application/json",
+                        br#"{"error":"unauthorized"}"#,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+
+                let closed = close_client_proxies(state.clone(), &run_id).await?;
+                let status = if closed.is_empty() {
+                    "404 Not Found"
+                } else {
+                    "200 OK"
+                };
+                let body = json!({
+                    "run_id": run_id,
+                    "closed_count": closed.len(),
+                    "closed": closed,
+                })
+                .to_string();
+                write_http_response(&mut stream, status, "application/json", body.as_bytes())
+                    .await?;
+                return Ok(());
+            }
+
+            if let Some((protocol, group)) = admin_close_group_target(method, path) {
+                if !dashboard_admin_authorized(&state, &prefix) {
+                    write_http_response(
+                        &mut stream,
+                        "401 Unauthorized",
+                        "application/json",
+                        br#"{"error":"unauthorized"}"#,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+
+                let closed = close_proxy_group(state.clone(), &protocol, &group).await?;
+                let status = if closed.is_empty() {
+                    "404 Not Found"
+                } else {
+                    "200 OK"
+                };
+                let body = json!({
+                    "protocol": protocol,
+                    "group": group,
+                    "closed_count": closed.len(),
+                    "closed": closed,
+                })
+                .to_string();
+                write_http_response(&mut stream, status, "application/json", body.as_bytes())
+                    .await?;
+                return Ok(());
+            }
+
+            if let Some(proxy_name) = admin_close_proxy_name(method, path) {
+                if !dashboard_admin_authorized(&state, &prefix) {
+                    write_http_response(
+                        &mut stream,
+                        "401 Unauthorized",
+                        "application/json",
+                        br#"{"error":"unauthorized"}"#,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+
+                let closed = close_proxy(state.clone(), &proxy_name).await?;
+                let status = if closed { "200 OK" } else { "404 Not Found" };
+                let body = json!({
+                    "proxy_name": proxy_name,
+                    "closed": closed,
+                })
+                .to_string();
+                write_http_response(&mut stream, status, "application/json", body.as_bytes())
+                    .await?;
+                return Ok(());
+            }
+        }
+        _ => {}
     }
 
     let status = dashboard_status_json(&state).await?;
@@ -1050,33 +2263,239 @@ async fn handle_dashboard_request(state: ServerState, mut stream: TcpStream) -> 
 }
 
 async fn dashboard_status_json(state: &ServerState) -> Result<serde_json::Value> {
-    let controls = state.controls.lock().await;
-    let proxies = state.proxy_entries.lock().await;
-    let proxy_list = proxies
-        .iter()
-        .map(|(name, entry)| {
-            json!({
-                "name": name,
-                "run_id": entry.run_id,
-                "type": entry.proxy_type,
-                "domains": entry.domains,
-                "remote_addr": entry.remote_addr,
-                "bandwidth_limit_bytes_per_second": entry.bandwidth_limit,
-            })
-        })
-        .collect::<Vec<_>>();
+    let client_count = state.controls.lock().await.len();
+    let proxy_count = state.proxy_entries.lock().await.len();
+    let clients = client_list_json(state).await?;
+    let proxies = proxy_list_json(state).await?;
+    let groups = tcp_group_list_json(state).await?;
+    let metrics = metrics_json(state);
 
     Ok(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "started_unix_secs": state.metrics.started_unix_secs,
-        "clients": controls.len(),
-        "proxies": proxy_list,
-        "metrics": {
-            "visitor_connections_total": state.metrics.visitor_connections_total.load(Ordering::Relaxed),
-            "bytes_up_total": state.metrics.bytes_up_total.load(Ordering::Relaxed),
-            "bytes_down_total": state.metrics.bytes_down_total.load(Ordering::Relaxed),
-        }
+        "client_count": client_count,
+        "proxy_count": proxy_count,
+        "clients": clients,
+        "proxies": proxies,
+        "groups": groups,
+        "metrics": metrics,
     }))
+}
+
+async fn client_list_json(state: &ServerState) -> Result<serde_json::Value> {
+    let controls = state.controls.lock().await;
+    let clients = controls
+        .values()
+        .map(|control| {
+            json!({
+                "run_id": control.run_id,
+                "peer_addr": control.peer_addr.to_string(),
+                "pool_count": control.pool_count,
+                "work_pool_queued": control.work_pool.queued.load(Ordering::Relaxed),
+                "work_pool_pending": control.work_pool.pending.load(Ordering::Relaxed),
+                "work_pool_waiters": control.work_pool.waiters.load(Ordering::Relaxed),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!(clients))
+}
+
+async fn proxy_list_json(state: &ServerState) -> Result<serde_json::Value> {
+    let proxies = state.proxy_entries.lock().await;
+    let proxy_list = proxies
+        .iter()
+        .map(|(name, entry)| {
+            let health = entry.health.as_ref().map(|health| {
+                json!({
+                    "healthy": health.healthy,
+                    "type": health.check_type,
+                    "detail": health.detail,
+                    "checked_unix_secs": health.checked_unix_secs,
+                    "updated_unix_secs": health.updated_unix_secs,
+                })
+            });
+            json!({
+                "name": name,
+                "run_id": entry.run_id,
+                "type": entry.proxy_type,
+                "group": entry.group,
+                "domains": entry.domains,
+                "remote_addr": entry.remote_addr,
+                "bandwidth_limit_bytes_per_second": entry.bandwidth_limit,
+                "health": health,
+                "started_unix_secs": entry.started_unix_secs,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!(proxy_list))
+}
+
+async fn tcp_group_list_json(state: &ServerState) -> Result<serde_json::Value> {
+    let tcp_groups = state.tcp_groups.lock().await;
+    let mut group_list = tcp_groups
+        .values()
+        .map(|group| {
+            json!({
+                "protocol": "tcp",
+                "group": group.group_name,
+                "remote_port": group.remote_port,
+                "remote_addr": group.remote_addr,
+                "member_count": group.routes.len(),
+                "members": group.routes.iter().map(|route| route.proxy_name.clone()).collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    drop(tcp_groups);
+
+    let udp_groups = state.udp_groups.lock().await;
+    group_list.extend(udp_groups.values().map(|group| {
+        json!({
+            "protocol": "udp",
+            "group": group.group_name,
+            "remote_port": group.remote_port,
+            "remote_addr": group.remote_addr,
+            "member_count": group.routes.len(),
+            "members": group.routes.iter().map(|route| route.proxy_name.clone()).collect::<Vec<_>>(),
+        })
+    }));
+    drop(udp_groups);
+
+    let stcp_groups = state.stcp_groups.lock().await;
+    group_list.extend(stcp_groups.values().map(|group| {
+        json!({
+            "protocol": "stcp",
+            "group": group.group_name,
+            "remote_port": null,
+            "remote_addr": format!("stcp://{}", group.group_name),
+            "member_count": group.routes.len(),
+            "members": group.routes.iter().map(|route| route.proxy_name.clone()).collect::<Vec<_>>(),
+        })
+    }));
+    drop(stcp_groups);
+
+    let xtcp_groups = state.xtcp_groups.lock().await;
+    group_list.extend(xtcp_groups.values().map(|group| {
+        json!({
+            "protocol": "xtcp",
+            "group": group.group_name,
+            "remote_port": null,
+            "remote_addr": format!("xtcp://{}", group.group_name),
+            "member_count": group.routes.len(),
+            "members": group.routes.iter().map(|route| route.proxy_name.clone()).collect::<Vec<_>>(),
+        })
+    }));
+    drop(xtcp_groups);
+
+    let proxies = state.proxy_entries.lock().await;
+    let mut vhost_groups: HashMap<(String, String), (String, Vec<String>)> = HashMap::new();
+    for (name, entry) in proxies.iter() {
+        if !matches!(entry.proxy_type.as_str(), "http" | "https" | "tcpmux") {
+            continue;
+        }
+        let Some(group) = entry.group.clone() else {
+            continue;
+        };
+        let (remote_addr, members) = vhost_groups
+            .entry((entry.proxy_type.clone(), group))
+            .or_insert_with(|| (entry.remote_addr.clone(), Vec::new()));
+        if remote_addr.is_empty() {
+            *remote_addr = entry.remote_addr.clone();
+        }
+        members.push(name.clone());
+    }
+    drop(proxies);
+
+    group_list.extend(vhost_groups.into_iter().map(
+        |((protocol, group), (remote_addr, members))| {
+            json!({
+                "protocol": protocol,
+                "group": group,
+                "remote_port": null,
+                "remote_addr": remote_addr,
+                "member_count": members.len(),
+                "members": members,
+            })
+        },
+    ));
+    Ok(json!(group_list))
+}
+
+fn metrics_json(state: &ServerState) -> serde_json::Value {
+    json!({
+        "visitor_connections_total": state.metrics.visitor_connections_total.load(Ordering::Relaxed),
+        "bytes_up_total": state.metrics.bytes_up_total.load(Ordering::Relaxed),
+        "bytes_down_total": state.metrics.bytes_down_total.load(Ordering::Relaxed),
+    })
+}
+
+fn reset_metrics(state: &ServerState) {
+    state
+        .metrics
+        .visitor_connections_total
+        .store(0, Ordering::Relaxed);
+    state.metrics.bytes_up_total.store(0, Ordering::Relaxed);
+    state.metrics.bytes_down_total.store(0, Ordering::Relaxed);
+}
+
+async fn allow_ports_json(state: &ServerState) -> serde_json::Value {
+    let allow_ports = state.allow_ports.lock().await.clone();
+    json!({
+        "allow_ports": allow_ports,
+    })
+}
+
+fn admin_close_proxy_name(method: &str, path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/api/proxies/")?;
+    match method {
+        "DELETE" => Some(rest.trim_matches('/').to_string()).filter(|name| !name.is_empty()),
+        "POST" => rest
+            .strip_suffix("/close")
+            .map(|name| name.trim_matches('/').to_string())
+            .filter(|name| !name.is_empty()),
+        _ => None,
+    }
+}
+
+fn admin_close_client_run_id(method: &str, path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/api/clients/")?;
+    match method {
+        "DELETE" => Some(rest.trim_matches('/').to_string()).filter(|run_id| !run_id.is_empty()),
+        "POST" => rest
+            .strip_suffix("/close")
+            .map(|run_id| run_id.trim_matches('/').to_string())
+            .filter(|run_id| !run_id.is_empty()),
+        _ => None,
+    }
+}
+
+fn admin_close_group_target(method: &str, path: &str) -> Option<(String, String)> {
+    let rest = path.strip_prefix("/api/groups/")?;
+    let mut parts = rest.trim_matches('/').split('/');
+    let protocol = parts.next()?.to_ascii_lowercase();
+    let group = parts.next()?.to_string();
+    if protocol.is_empty() || group.is_empty() {
+        return None;
+    }
+
+    match method {
+        "DELETE" if parts.next().is_none() => Some((protocol, group)),
+        "POST" if parts.next() == Some("close") && parts.next().is_none() => {
+            Some((protocol, group))
+        }
+        _ => None,
+    }
+}
+
+fn dashboard_admin_authorized(state: &ServerState, prefix: &[u8]) -> bool {
+    let Some(expected) = state.cfg.auth.token.as_deref() else {
+        return true;
+    };
+
+    parse_http_header(prefix, "authorization")
+        .and_then(|value| value.strip_prefix("Bearer ").map(str::to_string))
+        .as_deref()
+        == Some(expected)
+        || parse_http_header(prefix, "x-frprs-token").as_deref() == Some(expected)
 }
 
 async fn run_http_vhost(state: ServerState) -> Result<()> {
@@ -1139,12 +2558,23 @@ async fn handle_http_visitor(
     visitor_addr: SocketAddr,
 ) -> Result<()> {
     let prefix = read_http_prefix(&mut visitor).await?;
+    let method = parse_http_method(&prefix).unwrap_or_default();
     let host = parse_http_host(&prefix).ok_or_else(|| anyhow!("missing Host header"))?;
-    let route = {
-        let routes = state.http_routes.lock().await;
-        routes.get(&normalize_host(&host)).cloned()
+    let path = parse_http_path(&prefix).unwrap_or_else(|| "/".to_string());
+    if method.eq_ignore_ascii_case("CONNECT") {
+        return handle_tcpmux_connect(state, visitor, visitor_addr, host, path).await;
     }
-    .ok_or_else(|| anyhow!("no http proxy registered for host {host}"))?;
+
+    let route = select_http_route(state.clone(), &host, &path)
+        .await
+        .ok_or_else(|| anyhow!("no http proxy registered for host {host} path {path}"))?;
+
+    if !http_basic_auth_matches(&prefix, &route) {
+        write_http_unauthorized(&mut visitor).await?;
+        return Ok(());
+    }
+
+    let prefix = rewrite_http_prefix(&prefix, &route, visitor_addr)?;
 
     let mut work = acquire_work_conn(&route.control).await?;
 
@@ -1176,18 +2606,62 @@ async fn handle_http_visitor(
     Ok(())
 }
 
+async fn handle_tcpmux_connect(
+    state: ServerState,
+    mut visitor: TcpStream,
+    visitor_addr: SocketAddr,
+    host: String,
+    target: String,
+) -> Result<()> {
+    let route = select_tcpmux_route(state.clone(), &target)
+        .await
+        .ok_or_else(|| anyhow!("no tcpmux proxy registered for target {target}"))?;
+
+    visitor
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .await
+        .context("write tcpmux connect response")?;
+    let mut work = acquire_work_conn(&route.control).await?;
+    write_msg(
+        &mut work,
+        &Message::StartWorkConn {
+            proxy_name: route.proxy_name.clone(),
+            src_addr: visitor_addr.to_string(),
+            dst_addr: host,
+            error: String::new(),
+        },
+    )
+    .await?;
+
+    let (up, down) = copy_bidirectional_limited(&mut visitor, &mut work, route.bandwidth_limit)
+        .await
+        .with_context(|| format!("proxy tcpmux bytes for {}", route.proxy_name))?;
+    state
+        .metrics
+        .bytes_up_total
+        .fetch_add(up, Ordering::Relaxed);
+    state
+        .metrics
+        .bytes_down_total
+        .fetch_add(down, Ordering::Relaxed);
+    Ok(())
+}
+
 async fn handle_https_visitor(
     state: ServerState,
     mut visitor: TcpStream,
     visitor_addr: SocketAddr,
 ) -> Result<()> {
     let prefix = read_tls_client_hello_prefix(&mut visitor).await?;
-    let sni = parse_tls_sni(&prefix).ok_or_else(|| anyhow!("missing TLS SNI"))?;
-    let route = {
-        let routes = state.https_routes.lock().await;
-        routes.get(&normalize_host(&sni)).cloned()
-    }
-    .ok_or_else(|| anyhow!("no https proxy registered for SNI {sni}"))?;
+    let sni = parse_tls_sni(&prefix);
+    let route = select_https_route(state.clone(), sni.as_deref())
+        .await
+        .ok_or_else(|| {
+            anyhow!(
+                "no https proxy registered for SNI {}",
+                sni.as_deref().unwrap_or("<none>")
+            )
+        })?;
 
     let mut work = acquire_work_conn(&route.control).await?;
 
@@ -1196,7 +2670,7 @@ async fn handle_https_visitor(
         &Message::StartWorkConn {
             proxy_name: route.proxy_name.clone(),
             src_addr: visitor_addr.to_string(),
-            dst_addr: sni,
+            dst_addr: sni.unwrap_or_default(),
             error: String::new(),
         },
     )
@@ -1344,34 +2818,204 @@ async fn close_proxy(state: ServerState, proxy_name: &str) -> Result<bool> {
     let Some(entry) = entry else {
         return Ok(false);
     };
+    let hook_payload = json!({
+        "op": "CloseProxy",
+        "event": "close_proxy",
+        "proxy_name": proxy_name,
+        "proxy_type": entry.proxy_type.clone(),
+        "run_id": entry.run_id.clone(),
+        "group": entry.group.clone(),
+        "domains": entry.domains.clone(),
+        "remote_addr": entry.remote_addr.clone(),
+        "started_unix_secs": entry.started_unix_secs,
+        "closed_unix_secs": unix_now(),
+    });
 
     if let Some(task) = entry.task {
         task.abort();
     }
 
     match entry.proxy_type.as_str() {
+        "tcp" => {
+            if let Some(map_key) = entry.tcp_group_map_key {
+                let mut groups = state.tcp_groups.lock().await;
+                if let Some(group) = groups.get_mut(&map_key) {
+                    group.routes.retain(|route| route.proxy_name != proxy_name);
+                    if group.routes.is_empty() {
+                        let group = groups.remove(&map_key);
+                        if let Some(group) = group {
+                            group.task.abort();
+                        }
+                    } else if group.next >= group.routes.len() {
+                        group.next = 0;
+                    }
+                }
+            }
+        }
         "udp" => {
+            if let Some(map_key) = entry.udp_group_map_key {
+                let mut groups = state.udp_groups.lock().await;
+                if let Some(group) = groups.get_mut(&map_key) {
+                    group.routes.retain(|route| route.proxy_name != proxy_name);
+                    if group.routes.is_empty() {
+                        let group = groups.remove(&map_key);
+                        if let Some(group) = group {
+                            group.task.abort();
+                        }
+                    } else if group.next >= group.routes.len() {
+                        group.next = 0;
+                    }
+                }
+            }
             state.udp_relays.lock().await.remove(proxy_name);
         }
         "http" => {
             let mut routes = state.http_routes.lock().await;
             for domain in entry.domains {
-                routes.remove(&normalize_host(&domain));
+                let key = normalize_host(&domain);
+                if let Some(domain_routes) = routes.get_mut(&key) {
+                    domain_routes.retain(|route| route.proxy_name != proxy_name);
+                    if domain_routes.is_empty() {
+                        routes.remove(&key);
+                    }
+                }
             }
         }
         "https" => {
             let mut routes = state.https_routes.lock().await;
             for domain in entry.domains {
-                routes.remove(&normalize_host(&domain));
+                let key = normalize_host(&domain);
+                if let Some(domain_routes) = routes.get_mut(&key) {
+                    domain_routes.retain(|route| route.proxy_name != proxy_name);
+                    if domain_routes.is_empty() {
+                        routes.remove(&key);
+                    }
+                }
+            }
+        }
+        "tcpmux" => {
+            let mut routes = state.tcpmux_routes.lock().await;
+            for domain in entry.domains {
+                let key = normalize_host(&domain);
+                if let Some(domain_routes) = routes.get_mut(&key) {
+                    domain_routes.retain(|route| route.proxy_name != proxy_name);
+                    if domain_routes.is_empty() {
+                        routes.remove(&key);
+                    }
+                }
             }
         }
         "stcp" => {
+            if let Some(group_name) = entry.group {
+                let mut groups = state.stcp_groups.lock().await;
+                if let Some(group) = groups.get_mut(&group_name) {
+                    group.routes.retain(|route| route.proxy_name != proxy_name);
+                    if group.routes.is_empty() {
+                        groups.remove(&group_name);
+                    } else if group.next >= group.routes.len() {
+                        group.next = 0;
+                    }
+                }
+            }
             state.stcp_routes.lock().await.remove(proxy_name);
+        }
+        "xtcp" => {
+            if let Some(group_name) = entry.group {
+                let mut groups = state.xtcp_groups.lock().await;
+                if let Some(group) = groups.get_mut(&group_name) {
+                    group.routes.retain(|route| route.proxy_name != proxy_name);
+                    if group.routes.is_empty() {
+                        groups.remove(&group_name);
+                    } else if group.next >= group.routes.len() {
+                        group.next = 0;
+                    }
+                }
+            }
+            state.xtcp_routes.lock().await.remove(proxy_name);
+        }
+        "sudp" => {
+            state.sudp_routes.lock().await.remove(proxy_name);
+            state
+                .sudp_sessions
+                .lock()
+                .await
+                .retain(|(name, _), _| name != proxy_name);
         }
         _ => {}
     }
 
+    if let Err(err) =
+        call_plugin_hook(state.cfg.plugins.close_proxy_url.as_deref(), hook_payload).await
+    {
+        warn!("close proxy plugin hook failed for {proxy_name}: {err:#}");
+    }
+
     Ok(true)
+}
+
+async fn close_proxy_group(state: ServerState, protocol: &str, group: &str) -> Result<Vec<String>> {
+    let names = {
+        let entries = state.proxy_entries.lock().await;
+        entries
+            .iter()
+            .filter(|(_, entry)| {
+                entry.proxy_type == protocol && entry.group.as_deref() == Some(group)
+            })
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>()
+    };
+
+    let mut closed = Vec::new();
+    for name in names {
+        if close_proxy(state.clone(), &name).await? {
+            closed.push(name);
+        }
+    }
+
+    Ok(closed)
+}
+
+async fn close_client_proxies(state: ServerState, run_id: &str) -> Result<Vec<String>> {
+    let names = {
+        let entries = state.proxy_entries.lock().await;
+        entries
+            .iter()
+            .filter(|(_, entry)| entry.run_id == run_id)
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>()
+    };
+
+    let mut closed = Vec::new();
+    for name in names {
+        if close_proxy(state.clone(), &name).await? {
+            closed.push(name);
+        }
+    }
+
+    Ok(closed)
+}
+
+async fn update_proxy_health(
+    state: ServerState,
+    proxy_name: &str,
+    healthy: bool,
+    check_type: String,
+    detail: String,
+    checked_unix_secs: u64,
+) {
+    let mut entries = state.proxy_entries.lock().await;
+    let Some(entry) = entries.get_mut(proxy_name) else {
+        debug!("health status ignored for unknown proxy {proxy_name}");
+        return;
+    };
+
+    entry.health = Some(ProxyHealthStatus {
+        healthy,
+        check_type,
+        detail,
+        checked_unix_secs,
+        updated_unix_secs: unix_now(),
+    });
 }
 
 async fn close_proxies_for_run_id(state: ServerState, run_id: &str) -> Result<()> {
@@ -1415,15 +3059,555 @@ async fn read_http_prefix(stream: &mut TcpStream) -> Result<Vec<u8>> {
 }
 
 fn parse_http_host(prefix: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(prefix).ok()?;
+    parse_http_header(prefix, "host")
+}
+
+fn parse_http_method(prefix: &[u8]) -> Option<String> {
+    let header_end = http_header_end(prefix).unwrap_or(prefix.len());
+    let text = std::str::from_utf8(&prefix[..header_end]).ok()?;
+    text.lines()
+        .next()?
+        .split_whitespace()
+        .next()
+        .map(|method| method.to_string())
+}
+
+fn parse_http_header(prefix: &[u8], header_name: &str) -> Option<String> {
+    let header_end = http_header_end(prefix).unwrap_or(prefix.len());
+    let text = std::str::from_utf8(&prefix[..header_end]).ok()?;
     for line in text.lines() {
         if let Some((name, value)) = line.split_once(':') {
-            if name.eq_ignore_ascii_case("host") {
+            if name.eq_ignore_ascii_case(header_name) {
                 return Some(value.trim().to_string());
             }
         }
     }
     None
+}
+
+fn parse_http_path(prefix: &[u8]) -> Option<String> {
+    let header_end = http_header_end(prefix).unwrap_or(prefix.len());
+    let text = std::str::from_utf8(&prefix[..header_end]).ok()?;
+    text.lines()
+        .next()?
+        .split_whitespace()
+        .nth(1)
+        .map(|path| path.to_string())
+}
+
+async fn read_http_body(stream: &mut TcpStream, prefix: &[u8]) -> Result<Vec<u8>> {
+    let content_length = parse_http_header(prefix, "content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let header_end = http_header_end(prefix)
+        .map(|index| index + 4)
+        .ok_or_else(|| anyhow!("http header terminator missing"))?;
+    let mut body = prefix.get(header_end..).unwrap_or_default().to_vec();
+    if body.len() > content_length {
+        body.truncate(content_length);
+    }
+    while body.len() < content_length {
+        let mut buf = vec![0_u8; content_length - body.len()];
+        let n = stream
+            .read(&mut buf)
+            .await
+            .context("read http request body")?;
+        if n == 0 {
+            bail!("connection closed before full http body");
+        }
+        body.extend_from_slice(&buf[..n]);
+    }
+    Ok(body)
+}
+
+#[derive(Clone)]
+struct HttpRouteCandidate {
+    location_len: usize,
+    domain_len: usize,
+    route: ProxyRoute,
+}
+
+async fn select_http_route(state: ServerState, host: &str, path: &str) -> Option<ProxyRoute> {
+    let candidates = {
+        let routes = state.http_routes.lock().await;
+        find_http_route_candidates(&routes, host, path)
+    };
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let best_score = candidates
+        .iter()
+        .map(|candidate| (candidate.location_len, candidate.domain_len))
+        .max()?;
+    let mut best = candidates
+        .into_iter()
+        .filter(|candidate| (candidate.location_len, candidate.domain_len) == best_score)
+        .collect::<Vec<_>>();
+    let Some(group_name) = best
+        .iter()
+        .find_map(|candidate| candidate.route.group.clone())
+    else {
+        return best.into_iter().next().map(|candidate| candidate.route);
+    };
+    best.retain(|candidate| candidate.route.group.as_deref() == Some(group_name.as_str()));
+    if best.is_empty() {
+        return None;
+    }
+
+    let key = format!(
+        "http:{}:{}:{}:{}",
+        normalize_host(host),
+        best_score.0,
+        best_score.1,
+        group_name
+    );
+    let mut next = state.http_route_next.lock().await;
+    let index = next.entry(key).or_insert(0);
+    let route = best[*index % best.len()].route.clone();
+    *index = index.wrapping_add(1);
+    Some(route)
+}
+
+async fn select_tcpmux_route(state: ServerState, target: &str) -> Option<ProxyRoute> {
+    let host = normalize_host(target);
+    let candidates = {
+        let routes = state.tcpmux_routes.lock().await;
+        find_tcpmux_route_candidates(&routes, &host)
+    };
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let best_score = candidates
+        .iter()
+        .map(|candidate| candidate.domain_len)
+        .max()?;
+    let mut best = candidates
+        .into_iter()
+        .filter(|candidate| candidate.domain_len == best_score)
+        .collect::<Vec<_>>();
+    let Some(group_name) = best
+        .iter()
+        .find_map(|candidate| candidate.route.group.clone())
+    else {
+        return best.into_iter().next().map(|candidate| candidate.route);
+    };
+    best.retain(|candidate| candidate.route.group.as_deref() == Some(group_name.as_str()));
+    if best.is_empty() {
+        return None;
+    }
+
+    let key = format!("tcpmux:{host}:{group_name}");
+    let mut next = state.tcpmux_route_next.lock().await;
+    let index = next.entry(key).or_insert(0);
+    let route = best[*index % best.len()].route.clone();
+    *index = index.wrapping_add(1);
+    Some(route)
+}
+
+fn find_tcpmux_route_candidates(
+    routes: &HashMap<String, Vec<ProxyRoute>>,
+    host: &str,
+) -> Vec<HttpsRouteCandidate> {
+    let mut out = Vec::new();
+    if let Some(domain_routes) = routes.get(host) {
+        out.extend(
+            domain_routes
+                .iter()
+                .cloned()
+                .map(|route| HttpsRouteCandidate {
+                    domain_len: host.len(),
+                    route,
+                }),
+        );
+    }
+    for (domain, domain_routes) in routes {
+        if let Some(suffix) = wildcard_domain_suffix(domain, host) {
+            out.extend(
+                domain_routes
+                    .iter()
+                    .cloned()
+                    .map(|route| HttpsRouteCandidate {
+                        domain_len: suffix.len(),
+                        route,
+                    }),
+            );
+        }
+    }
+    if out.is_empty() {
+        if let Some(domain_routes) = routes.get("*") {
+            out.extend(
+                domain_routes
+                    .iter()
+                    .cloned()
+                    .map(|route| HttpsRouteCandidate {
+                        domain_len: 0,
+                        route,
+                    }),
+            );
+        }
+    }
+    out
+}
+
+fn find_http_route_candidates(
+    routes: &HashMap<String, Vec<ProxyRoute>>,
+    host: &str,
+    path: &str,
+) -> Vec<HttpRouteCandidate> {
+    let normalized = normalize_host(host);
+    let mut out = Vec::new();
+    if let Some(domain_routes) = routes.get(&normalized) {
+        out.extend(http_route_candidates_for_domain(
+            domain_routes,
+            path,
+            normalized.len(),
+        ));
+    }
+    for (domain, domain_routes) in routes {
+        if let Some(suffix) = wildcard_domain_suffix(domain, &normalized) {
+            out.extend(http_route_candidates_for_domain(
+                domain_routes,
+                path,
+                suffix.len(),
+            ));
+        }
+    }
+    out
+}
+
+fn http_route_candidates_for_domain(
+    routes: &[ProxyRoute],
+    path: &str,
+    domain_len: usize,
+) -> Vec<HttpRouteCandidate> {
+    routes
+        .iter()
+        .filter_map(|route| {
+            best_location_len(&route.locations, path).map(|location_len| HttpRouteCandidate {
+                location_len,
+                domain_len,
+                route: route.clone(),
+            })
+        })
+        .collect()
+}
+
+fn best_location_len(locations: &[String], path: &str) -> Option<usize> {
+    if locations.is_empty() {
+        return Some(0);
+    }
+
+    locations
+        .iter()
+        .filter(|location| path_matches_location(path, location))
+        .map(|location| location.len())
+        .max()
+}
+
+fn path_matches_location(path: &str, location: &str) -> bool {
+    if location == "/" {
+        return true;
+    }
+    let location = location.trim_end_matches('/');
+    path == location
+        || path
+            .strip_prefix(location)
+            .map(|rest| rest.starts_with('/'))
+            .unwrap_or(false)
+}
+
+fn ensure_http_group_key_matches(routes: &[ProxyRoute], route: &ProxyRoute) -> Result<()> {
+    let Some(group) = route.group.as_deref() else {
+        return Ok(());
+    };
+    for existing in routes {
+        if existing.group.as_deref() == Some(group) && existing.group_key != route.group_key {
+            bail!("http group {group} groupKey mismatch");
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct HttpsRouteCandidate {
+    domain_len: usize,
+    route: ProxyRoute,
+}
+
+async fn select_https_route(state: ServerState, sni: Option<&str>) -> Option<ProxyRoute> {
+    let candidates = {
+        let routes = state.https_routes.lock().await;
+        find_https_route_candidates(&routes, sni)
+    };
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let best_score = candidates
+        .iter()
+        .map(|candidate| candidate.domain_len)
+        .max()?;
+    let mut best = candidates
+        .into_iter()
+        .filter(|candidate| candidate.domain_len == best_score)
+        .collect::<Vec<_>>();
+    let Some(group_name) = best
+        .iter()
+        .find_map(|candidate| candidate.route.group.clone())
+    else {
+        return best.into_iter().next().map(|candidate| candidate.route);
+    };
+    best.retain(|candidate| candidate.route.group.as_deref() == Some(group_name.as_str()));
+    if best.is_empty() {
+        return None;
+    }
+
+    let key = format!(
+        "https:{}:{}",
+        sni.map(normalize_host).unwrap_or_default(),
+        group_name
+    );
+    let mut next = state.https_route_next.lock().await;
+    let index = next.entry(key).or_insert(0);
+    let route = best[*index % best.len()].route.clone();
+    *index = index.wrapping_add(1);
+    Some(route)
+}
+
+fn find_https_route_candidates(
+    routes: &HashMap<String, Vec<ProxyRoute>>,
+    sni: Option<&str>,
+) -> Vec<HttpsRouteCandidate> {
+    let Some(host) = sni else {
+        return routes
+            .get("*")
+            .into_iter()
+            .flat_map(|routes| {
+                routes.iter().cloned().map(|route| HttpsRouteCandidate {
+                    domain_len: 0,
+                    route,
+                })
+            })
+            .collect();
+    };
+    let normalized = normalize_host(host);
+    let mut out = Vec::new();
+    if let Some(domain_routes) = routes.get(&normalized) {
+        out.extend(
+            domain_routes
+                .iter()
+                .cloned()
+                .map(|route| HttpsRouteCandidate {
+                    domain_len: normalized.len(),
+                    route,
+                }),
+        );
+    }
+    for (domain, domain_routes) in routes {
+        if let Some(suffix) = wildcard_domain_suffix(domain, &normalized) {
+            out.extend(
+                domain_routes
+                    .iter()
+                    .cloned()
+                    .map(|route| HttpsRouteCandidate {
+                        domain_len: suffix.len(),
+                        route,
+                    }),
+            );
+        }
+    }
+    if out.is_empty() {
+        if let Some(domain_routes) = routes.get("*") {
+            out.extend(
+                domain_routes
+                    .iter()
+                    .cloned()
+                    .map(|route| HttpsRouteCandidate {
+                        domain_len: 0,
+                        route,
+                    }),
+            );
+        }
+    }
+    out
+}
+
+fn wildcard_domain_suffix<'a>(domain: &'a str, host: &str) -> Option<&'a str> {
+    let suffix = domain.strip_prefix("*.")?;
+    if host != suffix
+        && host
+            .strip_suffix(suffix)
+            .map(|prefix| prefix.ends_with('.'))
+            .unwrap_or(false)
+    {
+        Some(suffix)
+    } else {
+        None
+    }
+}
+
+fn normalize_locations(locations: &[String]) -> Vec<String> {
+    locations
+        .iter()
+        .map(|location| {
+            let trimmed = location.trim();
+            if trimmed.is_empty() {
+                "/".to_string()
+            } else if trimmed.starts_with('/') {
+                trimmed.to_string()
+            } else {
+                format!("/{trimmed}")
+            }
+        })
+        .collect()
+}
+
+fn http_basic_auth_matches(prefix: &[u8], route: &ProxyRoute) -> bool {
+    if route.http_user.is_none() && route.http_password.is_none() {
+        return true;
+    }
+
+    let user = route.http_user.as_deref().unwrap_or_default();
+    let password = route.http_password.as_deref().unwrap_or_default();
+    let expected = format!(
+        "Basic {}",
+        base64_encode(format!("{user}:{password}").as_bytes())
+    );
+    parse_http_header(prefix, "authorization")
+        .map(|got| got == expected)
+        .unwrap_or(false)
+}
+
+fn rewrite_http_prefix(
+    prefix: &[u8],
+    route: &ProxyRoute,
+    visitor_addr: SocketAddr,
+) -> Result<Vec<u8>> {
+    let Some(header_end) = http_header_end(prefix) else {
+        return Ok(prefix.to_vec());
+    };
+    let header = std::str::from_utf8(&prefix[..header_end]).context("decode http header")?;
+    let client_ip = visitor_addr.ip().to_string();
+    let mut out = String::with_capacity(header.len() + 128);
+    let mut lines = header.split("\r\n");
+    let request_line = lines.next().unwrap_or_default();
+    out.push_str(request_line);
+    out.push_str("\r\n");
+
+    let mut prior_forwarded_for = None;
+    let mut wrote_host = false;
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            out.push_str(line);
+            out.push_str("\r\n");
+            continue;
+        };
+
+        if name.eq_ignore_ascii_case("authorization")
+            && (route.http_user.is_some() || route.http_password.is_some())
+        {
+            continue;
+        }
+        if name.eq_ignore_ascii_case("host") {
+            if let Some(host) = &route.host_header_rewrite {
+                out.push_str("Host: ");
+                out.push_str(host);
+                out.push_str("\r\n");
+                wrote_host = true;
+                continue;
+            }
+            wrote_host = true;
+        }
+        if name.eq_ignore_ascii_case("x-real-ip") {
+            continue;
+        }
+        if name.eq_ignore_ascii_case("x-forwarded-for") {
+            prior_forwarded_for = Some(value.trim().to_string());
+            continue;
+        }
+        if route
+            .request_headers
+            .keys()
+            .any(|key| key.eq_ignore_ascii_case(name))
+        {
+            continue;
+        }
+
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+
+    if !wrote_host {
+        if let Some(host) = &route.host_header_rewrite {
+            out.push_str("Host: ");
+            out.push_str(host);
+            out.push_str("\r\n");
+        }
+    }
+    for (name, value) in &route.request_headers {
+        out.push_str(name);
+        out.push_str(": ");
+        out.push_str(value);
+        out.push_str("\r\n");
+    }
+    out.push_str("X-Real-IP: ");
+    out.push_str(&client_ip);
+    out.push_str("\r\n");
+    out.push_str("X-Forwarded-For: ");
+    if let Some(prior) = prior_forwarded_for.filter(|value| !value.is_empty()) {
+        out.push_str(&prior);
+        out.push_str(", ");
+    }
+    out.push_str(&client_ip);
+    out.push_str("\r\n\r\n");
+
+    let mut rewritten = out.into_bytes();
+    rewritten.extend_from_slice(&prefix[header_end + 4..]);
+    Ok(rewritten)
+}
+
+fn http_header_end(prefix: &[u8]) -> Option<usize> {
+    prefix.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+async fn write_http_unauthorized(stream: &mut TcpStream) -> Result<()> {
+    let body = b"Unauthorized";
+    let header = format!(
+        "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"frprs\"\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(body).await?;
+    stream.shutdown().await?;
+    Ok(())
 }
 
 async fn write_http_response(
@@ -1449,6 +3633,67 @@ fn normalize_host(host: &str) -> String {
         .next()
         .unwrap_or_default()
         .to_ascii_lowercase()
+}
+
+fn group_map_key(remote_port: u16, group: &str) -> String {
+    format!("{remote_port}:{}", group.trim())
+}
+
+fn remote_port_allowed(allow_ports: &[String], port: u16) -> Result<bool> {
+    if allow_ports.is_empty() {
+        return Ok(true);
+    }
+
+    for item in allow_ports {
+        let (start, end) = parse_port_range(item)?;
+        if (start..=end).contains(&port) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn parse_allow_ports_update(body: &[u8]) -> Result<Vec<String>> {
+    let value: serde_json::Value =
+        serde_json::from_slice(body).context("decode allowPorts update JSON")?;
+    let items = value
+        .get("allow_ports")
+        .or_else(|| value.get("allowPorts"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow!("allowPorts update needs allow_ports array"))?;
+    items
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(ToString::to_string)
+                .ok_or_else(|| anyhow!("allowPorts entries must be strings"))
+        })
+        .collect()
+}
+
+fn validate_allow_ports(allow_ports: &[String]) -> Result<()> {
+    for item in allow_ports {
+        parse_port_range(item)?;
+    }
+    Ok(())
+}
+
+fn parse_port_range(value: &str) -> Result<(u16, u16)> {
+    let trimmed = value.trim();
+    let (start, end) = match trimmed.split_once('-') {
+        Some((start, end)) => (start.trim(), end.trim()),
+        None => (trimmed, trimmed),
+    };
+    let start = start
+        .parse::<u16>()
+        .with_context(|| format!("invalid allowPorts start {start:?}"))?;
+    let end = end
+        .parse::<u16>()
+        .with_context(|| format!("invalid allowPorts end {end:?}"))?;
+    if start == 0 || end == 0 || start > end {
+        bail!("invalid allowPorts range {value:?}");
+    }
+    Ok((start, end))
 }
 
 fn parse_bandwidth_limit(value: &str) -> Result<u64> {
@@ -1655,4 +3900,11 @@ fn verify_token(cfg: &ServerConfig, got: Option<&str>) -> Result<()> {
         Some(expected) if Some(expected) != got => bail!("authentication failed"),
         _ => Ok(()),
     }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }

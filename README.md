@@ -16,16 +16,31 @@ This is a Rust rewrite scaffold for `fatedier/frp`.
 - 动态 TCP 远端监听注册
 - UDP 请求/响应包转发
 - HTTP 虚拟主机转发，按 `Host` 和 `customDomains` 路由
+- HTTP `locations` 路径路由、Basic Auth、Host/请求头改写和真实 IP 请求头
+- HTTP/HTTPS `group`/`groupKey` 分组负载均衡，支持同域名/路径或同 SNI 下多个代理轮询
 - HTTPS 透传，按 TLS SNI 和 `customDomains` 路由
+- HTTP/HTTPS `*.example.com` 风格通配域名
+- HTTPS `customDomains = ["*"]` 兜底路由，支持无 SNI 或未命中 SNI 的连接
+- TCP mux 基础 HTTP CONNECT 隧道，按 CONNECT 目标域名路由到 `tcpmux` 代理，并支持分组负载均衡
 - TCP 健康检查，服务健康时注册代理，不健康时关闭代理
+- HTTP 健康检查，按 2xx/3xx 响应判断健康，并向服务端上报代理健康状态
+- 服务端 `allowPorts` 端口白名单策略，限制 TCP/UDP 远端监听端口
+- Dashboard Admin API 支持运行时查看/替换 `allowPorts`
+- TCP `group`/`groupKey` 分组负载均衡，支持多个代理共享同一远端端口
 - 通过 `poolCount` 预创建 work connection 连接池
 - 通过 `bandwidthLimit` 对 TCP/HTTP/HTTPS 做带宽限制
+- UDP 本地会话复用、访问包批量转发和 `group`/`groupKey` 分组负载均衡
 - `frpc` 根据配置文件修改时间自动热加载
-- 轻量级 `frps` Dashboard，支持 `/` 和 `/api/status`
-- 服务端 HTTP 插件钩子，支持登录和新代理事件
-- STCP 私有 visitor 协议，支持 `sk` 密钥校验和本地 visitor 监听
+- 轻量级 `frps` Dashboard，支持 `/`、`/api/status`、`/api/clients`、`/api/proxies`、`/api/groups`、`/api/metrics`
+- Dashboard Admin API 支持运行时重置指标计数
+- Dashboard Admin API，支持通过鉴权请求关闭指定代理、代理分组或客户端下所有代理，并运行时更新端口白名单
+- 服务端 HTTP 插件钩子，支持登录、新代理和关闭代理事件，并在 payload 中带 `op` 操作名
+- 客户端 `localConnectURL` HTTP 插件钩子，支持 TCP/UDP/SUDP 本地连接或会话前放行/拒绝，并在 payload 中带 `op`
+- STCP/XTCP 私有 visitor 协议，支持 `sk` 密钥校验和本地 visitor 监听；XTCP 当前提供服务端中继 fallback
+- STCP/XTCP `group`/`groupKey` 私有服务分组负载均衡，visitor 可通过分组名轮询访问后端
+- SUDP 私有 visitor 协议，支持 `sk` 密钥校验和服务端中继 UDP 包转发
 - NAT 打洞控制器和控制通道候选地址交换消息
-- 通过 `transport.protocol` 支持 TCP、QUIC、KCP 控制/工作连接传输
+- 通过 `transport.protocol` 支持 TCP、TLS、WebSocket、QUIC、KCP 控制/工作连接传输
 - 按 visitor 请求 work connection
 - 双向 TCP 字节转发
 - 客户端断线自动重连
@@ -41,18 +56,22 @@ vhostHTTPPort = 8080
 vhostHTTPSPort = 8443
 dashboardAddr = "127.0.0.1"
 dashboardPort = 7500
+allowPorts = ["6000", "7000-7100"]
 
 [auth]
 token = "secret"
 
 [transport]
 protocol = "tcp"
+# protocol = "tls"
+# protocol = "websocket"
 # protocol = "kcp"
 # protocol = "quic"
 
 [plugins]
 loginURL = "http://127.0.0.1:9000/login"
 newProxyURL = "http://127.0.0.1:9000/new_proxy"
+closeProxyURL = "http://127.0.0.1:9000/close_proxy"
 ```
 
 客户端配置示例：
@@ -68,8 +87,13 @@ token = "secret"
 
 [transport]
 protocol = "tcp"
+# protocol = "tls"
+# protocol = "websocket"
 # protocol = "kcp"
 # protocol = "quic"
+
+[plugins]
+localConnectURL = "http://127.0.0.1:9001/local_connect"
 
 [[proxies]]
 name = "ssh"
@@ -78,6 +102,8 @@ localIP = "127.0.0.1"
 localPort = 22
 remotePort = 6000
 bandwidthLimit = "10MB"
+# group = "ssh-group"
+# groupKey = "shared-secret"
 
 [proxies.healthCheck]
 type = "tcp"
@@ -91,13 +117,32 @@ type = "http"
 localIP = "127.0.0.1"
 localPort = 8081
 customDomains = ["www.example.com"]
+locations = ["/api"]
+hostHeaderRewrite = "backend.internal"
+httpUser = "alice"
+httpPassword = "secret"
+# group = "web-group"
+# groupKey = "shared-secret"
+
+[proxies.requestHeaders.set]
+X-From-Where = "frp-rs"
 
 [[proxies]]
 name = "secure-web"
 type = "https"
 localIP = "127.0.0.1"
 localPort = 8444
-customDomains = ["secure.example.com"]
+customDomains = ["*.example.com"]
+# customDomains = ["*"]
+
+[[proxies]]
+name = "connect-ssh"
+type = "tcpmux"
+localIP = "127.0.0.1"
+localPort = 22
+customDomains = ["ssh.example.com"]
+# group = "ssh-mux-group"
+# groupKey = "shared-secret"
 
 [[proxies]]
 name = "dns"
@@ -105,12 +150,30 @@ type = "udp"
 localIP = "8.8.8.8"
 localPort = 53
 remotePort = 5353
+# group = "dns-group"
+# groupKey = "shared-secret"
 
 [[proxies]]
 name = "private-ssh"
 type = "stcp"
 localIP = "127.0.0.1"
 localPort = 22
+sk = "private-secret"
+# group = "private-ssh-group"
+# groupKey = "shared-secret"
+
+[[proxies]]
+name = "private-xtcp-ssh"
+type = "xtcp"
+localIP = "127.0.0.1"
+localPort = 22
+sk = "private-secret"
+
+[[proxies]]
+name = "private-dns"
+type = "sudp"
+localIP = "127.0.0.1"
+localPort = 5353
 sk = "private-secret"
 
 [[visitors]]
@@ -119,6 +182,22 @@ type = "stcp"
 serverName = "private-ssh"
 bindAddr = "127.0.0.1"
 bindPort = 16022
+sk = "private-secret"
+
+[[visitors]]
+name = "private-xtcp-ssh-visitor"
+type = "xtcp"
+serverName = "private-xtcp-ssh"
+bindAddr = "127.0.0.1"
+bindPort = 16023
+sk = "private-secret"
+
+[[visitors]]
+name = "private-dns-visitor"
+type = "sudp"
+serverName = "private-dns"
+bindAddr = "127.0.0.1"
+bindPort = 15353
 sk = "private-secret"
 ```
 
@@ -177,23 +256,24 @@ cargo run --bin frpc -- -c conf/frpc.toml
 
 功能路线图：
 
-- TCP：已实现基础反向代理链路。
-- HTTP：已实现按 `Host` 的基础转发；路径路由、请求头改写、Basic Auth、真实 IP 请求头、分组等仍待完善。
-- UDP：已实现基础请求/响应转发；NAT 会话复用、批量处理和包级优化仍待完善。
-- HTTPS：已实现 SNI 嗅探和原始 TLS 透传；通配域名和高级 fallback 行为仍待完善。
-- 健康检查：已实现 TCP 健康检查；HTTP 检查和更丰富的状态上报仍待完善。
+- TCP：已实现基础反向代理链路和 `group`/`groupKey` 分组负载均衡。
+- HTTP：已实现按 `Host`、通配域名和 `locations` 的转发，并支持请求头改写、Basic Auth、真实 IP 请求头和分组负载均衡。
+- UDP：已实现基础请求/响应转发、本地 NAT 会话复用、访问包批量转发和分组负载均衡；更深入的包级优化仍待完善。
+- HTTPS：已实现 SNI 嗅探、原始 TLS 透传、通配域名、`*` 兜底路由和分组负载均衡。
+- TCP mux：已实现基于 HTTP CONNECT 的基础隧道路由和分组负载均衡。
+- 健康检查：已实现 TCP/HTTP 健康检查，并在 Dashboard/API 中暴露代理健康状态。
 - 连接池：已通过 `poolCount` 实现预创建 work connection。
 - 带宽限制：已实现按代理限速。
-- Dashboard：已实现内置状态页面和 JSON API。
-- 插件：已实现服务端登录和新代理 plain HTTP 钩子。
+- Dashboard：已实现内置状态页面、客户端/代理/分组/指标 JSON API 和关闭代理/分组/客户端代理 Admin API。
+- 插件：已实现服务端登录、新代理、关闭代理 plain HTTP 钩子，并补充 frp 风格 `op` 字段。
 - 热加载：`frpc` 会监听配置文件修改时间并自动重连。
-- QUIC/KCP：已实现真实控制/工作连接传输，并有端到端代理测试覆盖。
-- STCP：已实现 TCP 流的私有 visitor 转发。
-- SUDP/XTCP/P2P：已具备 NAT 控制器基础，还需要补 UDP visitor 和完整 P2P 数据面。
-- Transport：后续继续补 TLS、WebSocket、TCP mux 等传输能力。
-- 运行时控制：后续补 Admin API、更多状态 API、指标等。
-- 策略能力：后续补端口白名单、分组、负载均衡等。
-- 插件能力：后续补客户端插件钩子和更多协议兼容。
+- TLS/WebSocket/QUIC/KCP：已实现真实控制/工作连接传输，并有端到端代理测试覆盖。
+- STCP/XTCP：已实现 TCP 流的私有 visitor 转发和分组负载均衡；XTCP 当前走服务端中继 fallback。
+- SUDP/XTCP/P2P：已实现服务端中继版 SUDP/XTCP visitor，并具备 NAT 控制器基础；完整 P2P 数据面仍待实现。
+- Transport：已补 TLS、WebSocket 和基础 TCP mux；后续继续补更完整的 mux 连接复用能力。
+- 运行时控制：已补轻量 Admin API、更多状态 API、指标接口、指标重置、按代理/分组/客户端关闭能力和 `allowPorts` 运行时更新；后续补更完整的运行时配置管理。
+- 策略能力：已补端口白名单和 TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/XTCP 分组负载均衡；后续补更多协议的分组能力。
+- 插件能力：已补客户端 TCP/UDP/SUDP 本地连接或会话前 HTTP 钩子和 `op` 兼容字段；后续补更多协议兼容。
 - VirtualNet 和 SSH tunnel gateway：作为独立里程碑实现。
 
 ## English
@@ -208,16 +288,31 @@ The current milestone implements the core reverse TCP proxy path:
 - dynamic TCP remote listener registration
 - UDP request/response packet forwarding
 - HTTP vhost routing by `Host` header and `customDomains`
+- HTTP `locations` routing, Basic Auth, Host/header rewrite, and real-IP headers
+- HTTP/HTTPS `group`/`groupKey` load balancing across multiple proxies for the same host/path or SNI
 - HTTPS passthrough routing by TLS SNI and `customDomains`
+- HTTP/HTTPS wildcard domains such as `*.example.com`
+- HTTPS `customDomains = ["*"]` fallback routing for connections without a matching SNI
+- basic TCP mux HTTP CONNECT tunnels routed by CONNECT target domain to `tcpmux` proxies, with group load balancing
 - TCP health checks that register healthy proxies and close unhealthy ones
+- HTTP health checks based on 2xx/3xx responses, with proxy health status reporting to frps
+- server-side `allowPorts` policy for TCP/UDP remote listeners
+- dashboard Admin API for viewing/replacing `allowPorts` at runtime
+- TCP `group`/`groupKey` load balancing across multiple proxies sharing one remote port
 - pre-opened TCP work connection pools with `poolCount`
 - TCP/HTTP/HTTPS bandwidth limiting with `bandwidthLimit`
+- UDP local session reuse, visitor-packet batching, and `group`/`groupKey` load balancing
 - frpc config hot reload by file modification time
-- lightweight frps dashboard at `/` and `/api/status`
-- basic server-side HTTP plugin hooks for login and new proxy events
-- STCP private visitor protocol with `sk` authentication and local visitor listeners
+- lightweight frps dashboard at `/`, `/api/status`, `/api/clients`, `/api/proxies`, `/api/groups`, and `/api/metrics`
+- dashboard Admin API for resetting metrics counters at runtime
+- dashboard Admin API for closing a proxy, proxy group, or all proxies for a client, plus runtime allowPorts updates with an authenticated request
+- basic server-side HTTP plugin hooks for login, new proxy, and close proxy events, with `op` in payloads
+- client-side `localConnectURL` HTTP plugin hook before TCP/UDP/SUDP local connects or sessions, with `op` in payloads
+- STCP/XTCP private visitor protocols with `sk` authentication and local visitor listeners; XTCP currently uses a server-relayed fallback
+- STCP/XTCP `group`/`groupKey` load balancing, allowing visitors to target a private service group
+- SUDP private visitor protocol with `sk` authentication and server-relayed UDP forwarding
 - NAT hole punching controller and control-channel candidate exchange messages
-- TCP, QUIC, and KCP control/work transports via `transport.protocol`
+- TCP, TLS, WebSocket, QUIC, and KCP control/work transports via `transport.protocol`
 - per-visitor work connection request
 - bidirectional TCP byte forwarding
 - reconnecting client session loop
@@ -233,18 +328,22 @@ vhostHTTPPort = 8080
 vhostHTTPSPort = 8443
 dashboardAddr = "127.0.0.1"
 dashboardPort = 7500
+allowPorts = ["6000", "7000-7100"]
 
 [auth]
 token = "secret"
 
 [transport]
 protocol = "tcp"
+# protocol = "tls"
+# protocol = "websocket"
 # protocol = "kcp"
 # protocol = "quic"
 
 [plugins]
 loginURL = "http://127.0.0.1:9000/login"
 newProxyURL = "http://127.0.0.1:9000/new_proxy"
+closeProxyURL = "http://127.0.0.1:9000/close_proxy"
 ```
 
 ```toml
@@ -258,8 +357,13 @@ token = "secret"
 
 [transport]
 protocol = "tcp"
+# protocol = "tls"
+# protocol = "websocket"
 # protocol = "kcp"
 # protocol = "quic"
+
+[plugins]
+localConnectURL = "http://127.0.0.1:9001/local_connect"
 
 [[proxies]]
 name = "ssh"
@@ -268,6 +372,8 @@ localIP = "127.0.0.1"
 localPort = 22
 remotePort = 6000
 bandwidthLimit = "10MB"
+# group = "ssh-group"
+# groupKey = "shared-secret"
 
 [proxies.healthCheck]
 type = "tcp"
@@ -281,13 +387,32 @@ type = "http"
 localIP = "127.0.0.1"
 localPort = 8081
 customDomains = ["www.example.com"]
+locations = ["/api"]
+hostHeaderRewrite = "backend.internal"
+httpUser = "alice"
+httpPassword = "secret"
+# group = "web-group"
+# groupKey = "shared-secret"
+
+[proxies.requestHeaders.set]
+X-From-Where = "frp-rs"
 
 [[proxies]]
 name = "secure-web"
 type = "https"
 localIP = "127.0.0.1"
 localPort = 8444
-customDomains = ["secure.example.com"]
+customDomains = ["*.example.com"]
+# customDomains = ["*"]
+
+[[proxies]]
+name = "connect-ssh"
+type = "tcpmux"
+localIP = "127.0.0.1"
+localPort = 22
+customDomains = ["ssh.example.com"]
+# group = "ssh-mux-group"
+# groupKey = "shared-secret"
 
 [[proxies]]
 name = "dns"
@@ -295,12 +420,30 @@ type = "udp"
 localIP = "8.8.8.8"
 localPort = 53
 remotePort = 5353
+# group = "dns-group"
+# groupKey = "shared-secret"
 
 [[proxies]]
 name = "private-ssh"
 type = "stcp"
 localIP = "127.0.0.1"
 localPort = 22
+sk = "private-secret"
+# group = "private-ssh-group"
+# groupKey = "shared-secret"
+
+[[proxies]]
+name = "private-xtcp-ssh"
+type = "xtcp"
+localIP = "127.0.0.1"
+localPort = 22
+sk = "private-secret"
+
+[[proxies]]
+name = "private-dns"
+type = "sudp"
+localIP = "127.0.0.1"
+localPort = 5353
 sk = "private-secret"
 
 [[visitors]]
@@ -309,6 +452,22 @@ type = "stcp"
 serverName = "private-ssh"
 bindAddr = "127.0.0.1"
 bindPort = 16022
+sk = "private-secret"
+
+[[visitors]]
+name = "private-xtcp-ssh-visitor"
+type = "xtcp"
+serverName = "private-xtcp-ssh"
+bindAddr = "127.0.0.1"
+bindPort = 16023
+sk = "private-secret"
+
+[[visitors]]
+name = "private-dns-visitor"
+type = "sudp"
+serverName = "private-dns"
+bindAddr = "127.0.0.1"
+bindPort = 15353
 sk = "private-secret"
 ```
 
@@ -321,21 +480,22 @@ cargo run --bin frpc -- -c conf/frpc.toml
 
 Parity roadmap:
 
-- TCP: first milestone implemented.
-- HTTP: basic Host based forwarding implemented; path routing, header rewrite, basic auth, real IP headers, and groups remain.
-- UDP: basic request/response forwarding implemented; NAT session reuse, batching, and packet-level optimizations remain.
-- HTTPS: basic SNI sniffing and raw TLS passthrough routing implemented; wildcard domains and advanced fallback behavior remain.
-- Health checks: TCP health checks implemented; HTTP checks and richer status reporting remain.
+- TCP: first milestone and `group`/`groupKey` load balancing implemented.
+- HTTP: Host, wildcard-domain, and `locations` routing implemented, with header rewrite, Basic Auth, real-IP headers, and group load balancing.
+- UDP: basic request/response forwarding, local NAT session reuse, visitor-packet batching, and group load balancing implemented; deeper packet-level optimizations remain.
+- HTTPS: SNI sniffing, raw TLS passthrough routing, wildcard domains, `*` fallback routing, and group load balancing implemented.
+- TCP mux: basic HTTP CONNECT tunnel routing and group load balancing implemented.
+- Health checks: TCP and HTTP health checks implemented, with proxy health status exposed through the Dashboard/API.
 - Connection pool: pre-opened TCP work connections implemented through `poolCount`.
 - Bandwidth limit: per-proxy byte throttling implemented for stream proxies.
-- Dashboard: lightweight built-in status page and JSON API implemented.
-- Plugins: basic plain-HTTP login and new-proxy hooks implemented.
+- Dashboard: built-in status page, client/proxy/group/metrics JSON APIs, and close-proxy/group/client Admin APIs implemented.
+- Plugins: basic plain-HTTP login, new-proxy, and close-proxy hooks implemented, with frp-style `op` fields.
 - Hot reload: frpc watches config file mtime and reconnects on change.
-- QUIC/KCP: real control/work transports implemented and covered by end-to-end proxy tests.
-- STCP: private visitor flow implemented for TCP streams.
-- SUDP/XTCP/P2P: add UDP visitor and full peer-to-peer data plane on top of the NAT controller.
-- Transport: add TLS, WebSocket, QUIC, KCP, TCP muxing, connection pools.
-- Runtime controls: add hot reload, admin API, status API, metrics, dashboard.
-- Policy: add allow ports, bandwidth limits, health checks, groups, load balancing.
-- Plugins: add server and client plugin hook protocols.
+- TLS/WebSocket/QUIC/KCP: real control/work transports implemented and covered by end-to-end proxy tests.
+- STCP/XTCP: private visitor flow and group load balancing implemented for TCP streams; XTCP currently uses a server-relayed fallback.
+- SUDP/XTCP/P2P: server-relayed SUDP/XTCP visitors implemented on top of the control channel; the full peer-to-peer data plane remains.
+- Transport: TLS, WebSocket, and basic TCP mux implemented; add fuller mux connection reuse and more connection-pool tuning.
+- Runtime controls: lightweight Admin API, richer status APIs, metrics endpoint/reset, proxy/group/client close operations, and runtime `allowPorts` updates implemented; full runtime config management remains.
+- Policy: allow ports and TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/XTCP group load balancing implemented; broader protocol group support remains.
+- Plugins: client-side local-connect HTTP hook implemented for TCP/UDP/SUDP with `op` compatibility fields; more protocol compatibility remains.
 - VirtualNet and SSH tunnel gateway: separate milestones.
