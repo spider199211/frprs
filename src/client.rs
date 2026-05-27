@@ -881,14 +881,37 @@ fn spawn_udp_response_loop(state: ClientState, key: (String, String), socket: Ar
                 }
                 Err(_) => break,
             };
-            if let Err(err) = state
-                .send(&Message::UdpPacket {
-                    proxy_name: key.0.clone(),
-                    content: buf[..n].to_vec(),
-                    visitor_addr: key.1.clone(),
-                })
-                .await
-            {
+            let mut packets = vec![UdpPacketFrame {
+                proxy_name: key.0.clone(),
+                content: buf[..n].to_vec(),
+                visitor_addr: key.1.clone(),
+            }];
+            while packets.len() < 32 {
+                match time::timeout(Duration::from_millis(2), socket.recv_from(&mut buf)).await {
+                    Ok(Ok((n, _))) => packets.push(UdpPacketFrame {
+                        proxy_name: key.0.clone(),
+                        content: buf[..n].to_vec(),
+                        visitor_addr: key.1.clone(),
+                    }),
+                    Ok(Err(err)) => {
+                        debug!("udp session recv failed: {err:#}");
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            let msg = if packets.len() == 1 {
+                let packet = packets.pop().expect("batch has one packet");
+                Message::UdpPacket {
+                    proxy_name: packet.proxy_name,
+                    content: packet.content,
+                    visitor_addr: packet.visitor_addr,
+                }
+            } else {
+                Message::UdpPacketBatch { packets }
+            };
+            if let Err(err) = state.send(&msg).await {
                 debug!("udp session response send failed: {err:#}");
                 break;
             }

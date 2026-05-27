@@ -60,6 +60,8 @@ pub struct ServerPluginConfig {
     pub login_url: Option<String>,
     #[serde(rename = "newProxyURL", default)]
     pub new_proxy_url: Option<String>,
+    #[serde(rename = "newUserConnURL", default)]
+    pub new_user_conn_url: Option<String>,
     #[serde(rename = "closeProxyURL", default)]
     pub close_proxy_url: Option<String>,
 }
@@ -370,12 +372,17 @@ mod tests {
             allowPorts = ["6000", "7000-7010"]
 
             [plugins]
+            newUserConnURL = "http://127.0.0.1:9000/new_user_conn"
             closeProxyURL = "http://127.0.0.1:9000/close_proxy"
             "#,
         )
         .unwrap();
 
         assert_eq!(cfg.allow_ports, vec!["6000", "7000-7010"]);
+        assert_eq!(
+            cfg.plugins.new_user_conn_url.as_deref(),
+            Some("http://127.0.0.1:9000/new_user_conn")
+        );
         assert_eq!(
             cfg.plugins.close_proxy_url.as_deref(),
             Some("http://127.0.0.1:9000/close_proxy")

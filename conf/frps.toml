@@ -21,4 +21,5 @@ protocol = "tcp"
 # [plugins]
 # loginURL = "http://127.0.0.1:9000/login"
 # newProxyURL = "http://127.0.0.1:9000/new_proxy"
+# newUserConnURL = "http://127.0.0.1:9000/new_user_conn"
 # closeProxyURL = "http://127.0.0.1:9000/close_proxy"

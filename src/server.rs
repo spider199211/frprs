@@ -1039,6 +1039,7 @@ async fn start_tcp_proxy(
     let run_id = control.run_id.clone();
     let task_proxy_name = proxy_name.clone();
     let metrics = state.metrics.clone();
+    let new_user_conn_url = state.cfg.plugins.new_user_conn_url.clone();
     let task = tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -1047,6 +1048,7 @@ async fn start_tcp_proxy(
                     let control = control.clone();
                     let proxy_name = task_proxy_name.clone();
                     let metrics = metrics.clone();
+                    let new_user_conn_url = new_user_conn_url.clone();
                     metrics
                         .visitor_connections_total
                         .fetch_add(1, Ordering::Relaxed);
@@ -1058,6 +1060,7 @@ async fn start_tcp_proxy(
                             visitor,
                             visitor_addr,
                             bandwidth_limit,
+                            new_user_conn_url,
                         )
                         .await
                         {
@@ -1141,6 +1144,7 @@ async fn start_tcp_group_proxy(
             let task_key = map_key.clone();
             let task_group = group.clone();
             let metrics = state.metrics.clone();
+            let new_user_conn_url = state.cfg.plugins.new_user_conn_url.clone();
             let task = tokio::spawn(async move {
                 loop {
                     match listener.accept().await {
@@ -1158,6 +1162,7 @@ async fn start_tcp_group_proxy(
                                 }
                             };
                             let metrics = metrics.clone();
+                            let new_user_conn_url = new_user_conn_url.clone();
                             metrics
                                 .visitor_connections_total
                                 .fetch_add(1, Ordering::Relaxed);
@@ -1169,6 +1174,7 @@ async fn start_tcp_group_proxy(
                                     visitor,
                                     visitor_addr,
                                     route.bandwidth_limit,
+                                    new_user_conn_url,
                                 )
                                 .await
                                 {
@@ -2004,7 +2010,20 @@ async fn handle_tcp_visitor(
     mut visitor: TcpStream,
     visitor_addr: SocketAddr,
     bandwidth_limit: Option<u64>,
+    new_user_conn_url: Option<String>,
 ) -> Result<()> {
+    call_plugin_hook(
+        new_user_conn_url.as_deref(),
+        json!({
+            "op": "NewUserConn",
+            "proxy_name": proxy_name.clone(),
+            "proxy_type": "tcp",
+            "run_id": control.run_id.clone(),
+            "user_addr": visitor_addr.to_string(),
+            "remote_addr": visitor.local_addr().map(|addr| addr.to_string()).unwrap_or_default(),
+        }),
+    )
+    .await?;
     let mut work = acquire_work_conn(&control).await?;
 
     write_msg(
@@ -2574,6 +2593,21 @@ async fn handle_http_visitor(
         return Ok(());
     }
 
+    call_plugin_hook(
+        state.cfg.plugins.new_user_conn_url.as_deref(),
+        json!({
+            "op": "NewUserConn",
+            "proxy_name": route.proxy_name.clone(),
+            "proxy_type": "http",
+            "run_id": route.control.run_id.clone(),
+            "user_addr": visitor_addr.to_string(),
+            "remote_addr": visitor.local_addr().map(|addr| addr.to_string()).unwrap_or_default(),
+            "dst_addr": host.clone(),
+            "path": path,
+        }),
+    )
+    .await?;
+
     let prefix = rewrite_http_prefix(&prefix, &route, visitor_addr)?;
 
     let mut work = acquire_work_conn(&route.control).await?;
@@ -2616,6 +2650,20 @@ async fn handle_tcpmux_connect(
     let route = select_tcpmux_route(state.clone(), &target)
         .await
         .ok_or_else(|| anyhow!("no tcpmux proxy registered for target {target}"))?;
+
+    call_plugin_hook(
+        state.cfg.plugins.new_user_conn_url.as_deref(),
+        json!({
+            "op": "NewUserConn",
+            "proxy_name": route.proxy_name.clone(),
+            "proxy_type": "tcpmux",
+            "run_id": route.control.run_id.clone(),
+            "user_addr": visitor_addr.to_string(),
+            "remote_addr": visitor.local_addr().map(|addr| addr.to_string()).unwrap_or_default(),
+            "dst_addr": target,
+        }),
+    )
+    .await?;
 
     visitor
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -2662,6 +2710,21 @@ async fn handle_https_visitor(
                 sni.as_deref().unwrap_or("<none>")
             )
         })?;
+    let dst_addr = sni.unwrap_or_default();
+
+    call_plugin_hook(
+        state.cfg.plugins.new_user_conn_url.as_deref(),
+        json!({
+            "op": "NewUserConn",
+            "proxy_name": route.proxy_name.clone(),
+            "proxy_type": "https",
+            "run_id": route.control.run_id.clone(),
+            "user_addr": visitor_addr.to_string(),
+            "remote_addr": visitor.local_addr().map(|addr| addr.to_string()).unwrap_or_default(),
+            "dst_addr": dst_addr.clone(),
+        }),
+    )
+    .await?;
 
     let mut work = acquire_work_conn(&route.control).await?;
 
@@ -2670,7 +2733,7 @@ async fn handle_https_visitor(
         &Message::StartWorkConn {
             proxy_name: route.proxy_name.clone(),
             src_addr: visitor_addr.to_string(),
-            dst_addr: sni.unwrap_or_default(),
+            dst_addr,
             error: String::new(),
         },
     )

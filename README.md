@@ -34,7 +34,7 @@ This is a Rust rewrite scaffold for `fatedier/frp`.
 - 轻量级 `frps` Dashboard，支持 `/`、`/api/status`、`/api/clients`、`/api/proxies`、`/api/groups`、`/api/metrics`
 - Dashboard Admin API 支持运行时重置指标计数
 - Dashboard Admin API，支持通过鉴权请求关闭指定代理、代理分组或客户端下所有代理，并运行时更新端口白名单
-- 服务端 HTTP 插件钩子，支持登录、新代理和关闭代理事件，并在 payload 中带 `op` 操作名
+- 服务端 HTTP 插件钩子，支持登录、新代理、新用户连接和关闭代理事件，并在 payload 中带 `op` 操作名
 - 客户端 `localConnectURL` HTTP 插件钩子，支持 TCP/UDP/SUDP 本地连接或会话前放行/拒绝，并在 payload 中带 `op`
 - STCP/XTCP 私有 visitor 协议，支持 `sk` 密钥校验和本地 visitor 监听；XTCP 当前提供服务端中继 fallback
 - STCP/XTCP `group`/`groupKey` 私有服务分组负载均衡，visitor 可通过分组名轮询访问后端
@@ -71,6 +71,7 @@ protocol = "tcp"
 [plugins]
 loginURL = "http://127.0.0.1:9000/login"
 newProxyURL = "http://127.0.0.1:9000/new_proxy"
+newUserConnURL = "http://127.0.0.1:9000/new_user_conn"
 closeProxyURL = "http://127.0.0.1:9000/close_proxy"
 ```
 
@@ -258,14 +259,14 @@ cargo run --bin frpc -- -c conf/frpc.toml
 
 - TCP：已实现基础反向代理链路和 `group`/`groupKey` 分组负载均衡。
 - HTTP：已实现按 `Host`、通配域名和 `locations` 的转发，并支持请求头改写、Basic Auth、真实 IP 请求头和分组负载均衡。
-- UDP：已实现基础请求/响应转发、本地 NAT 会话复用、访问包批量转发和分组负载均衡；更深入的包级优化仍待完善。
+- UDP：已实现基础请求/响应转发、本地 NAT 会话复用、双向包批量转发和分组负载均衡；更深入的包级优化仍待完善。
 - HTTPS：已实现 SNI 嗅探、原始 TLS 透传、通配域名、`*` 兜底路由和分组负载均衡。
 - TCP mux：已实现基于 HTTP CONNECT 的基础隧道路由和分组负载均衡。
 - 健康检查：已实现 TCP/HTTP 健康检查，并在 Dashboard/API 中暴露代理健康状态。
 - 连接池：已通过 `poolCount` 实现预创建 work connection。
 - 带宽限制：已实现按代理限速。
 - Dashboard：已实现内置状态页面、客户端/代理/分组/指标 JSON API 和关闭代理/分组/客户端代理 Admin API。
-- 插件：已实现服务端登录、新代理、关闭代理 plain HTTP 钩子，并补充 frp 风格 `op` 字段。
+- 插件：已实现服务端登录、新代理、TCP/HTTP/HTTPS/TCPMUX 新用户连接、关闭代理 plain HTTP 钩子，并补充 frp 风格 `op` 字段。
 - 热加载：`frpc` 会监听配置文件修改时间并自动重连。
 - TLS/WebSocket/QUIC/KCP：已实现真实控制/工作连接传输，并有端到端代理测试覆盖。
 - STCP/XTCP：已实现 TCP 流的私有 visitor 转发和分组负载均衡；XTCP 当前走服务端中继 fallback。
@@ -273,7 +274,7 @@ cargo run --bin frpc -- -c conf/frpc.toml
 - Transport：已补 TLS、WebSocket 和基础 TCP mux；后续继续补更完整的 mux 连接复用能力。
 - 运行时控制：已补轻量 Admin API、更多状态 API、指标接口、指标重置、按代理/分组/客户端关闭能力和 `allowPorts` 运行时更新；后续补更完整的运行时配置管理。
 - 策略能力：已补端口白名单和 TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/XTCP 分组负载均衡；后续补更多协议的分组能力。
-- 插件能力：已补客户端 TCP/UDP/SUDP 本地连接或会话前 HTTP 钩子和 `op` 兼容字段；后续补更多协议兼容。
+- 插件能力：已补服务端 TCP/HTTP/HTTPS/TCPMUX 新用户连接钩子、客户端 TCP/UDP/SUDP 本地连接或会话前 HTTP 钩子和 `op` 兼容字段；后续补更多协议兼容。
 - VirtualNet 和 SSH tunnel gateway：作为独立里程碑实现。
 
 ## English
@@ -306,7 +307,7 @@ The current milestone implements the core reverse TCP proxy path:
 - lightweight frps dashboard at `/`, `/api/status`, `/api/clients`, `/api/proxies`, `/api/groups`, and `/api/metrics`
 - dashboard Admin API for resetting metrics counters at runtime
 - dashboard Admin API for closing a proxy, proxy group, or all proxies for a client, plus runtime allowPorts updates with an authenticated request
-- basic server-side HTTP plugin hooks for login, new proxy, and close proxy events, with `op` in payloads
+- basic server-side HTTP plugin hooks for login, new proxy, TCP/HTTP/HTTPS/TCPMUX new user connection, and close proxy events, with `op` in payloads
 - client-side `localConnectURL` HTTP plugin hook before TCP/UDP/SUDP local connects or sessions, with `op` in payloads
 - STCP/XTCP private visitor protocols with `sk` authentication and local visitor listeners; XTCP currently uses a server-relayed fallback
 - STCP/XTCP `group`/`groupKey` load balancing, allowing visitors to target a private service group
@@ -343,6 +344,7 @@ protocol = "tcp"
 [plugins]
 loginURL = "http://127.0.0.1:9000/login"
 newProxyURL = "http://127.0.0.1:9000/new_proxy"
+newUserConnURL = "http://127.0.0.1:9000/new_user_conn"
 closeProxyURL = "http://127.0.0.1:9000/close_proxy"
 ```
 
@@ -482,14 +484,14 @@ Parity roadmap:
 
 - TCP: first milestone and `group`/`groupKey` load balancing implemented.
 - HTTP: Host, wildcard-domain, and `locations` routing implemented, with header rewrite, Basic Auth, real-IP headers, and group load balancing.
-- UDP: basic request/response forwarding, local NAT session reuse, visitor-packet batching, and group load balancing implemented; deeper packet-level optimizations remain.
+- UDP: basic request/response forwarding, local NAT session reuse, bidirectional packet batching, and group load balancing implemented; deeper packet-level optimizations remain.
 - HTTPS: SNI sniffing, raw TLS passthrough routing, wildcard domains, `*` fallback routing, and group load balancing implemented.
 - TCP mux: basic HTTP CONNECT tunnel routing and group load balancing implemented.
 - Health checks: TCP and HTTP health checks implemented, with proxy health status exposed through the Dashboard/API.
 - Connection pool: pre-opened TCP work connections implemented through `poolCount`.
 - Bandwidth limit: per-proxy byte throttling implemented for stream proxies.
 - Dashboard: built-in status page, client/proxy/group/metrics JSON APIs, and close-proxy/group/client Admin APIs implemented.
-- Plugins: basic plain-HTTP login, new-proxy, and close-proxy hooks implemented, with frp-style `op` fields.
+- Plugins: basic plain-HTTP login, new-proxy, TCP/HTTP/HTTPS/TCPMUX new-user-connection, and close-proxy hooks implemented, with frp-style `op` fields.
 - Hot reload: frpc watches config file mtime and reconnects on change.
 - TLS/WebSocket/QUIC/KCP: real control/work transports implemented and covered by end-to-end proxy tests.
 - STCP/XTCP: private visitor flow and group load balancing implemented for TCP streams; XTCP currently uses a server-relayed fallback.
@@ -497,5 +499,5 @@ Parity roadmap:
 - Transport: TLS, WebSocket, and basic TCP mux implemented; add fuller mux connection reuse and more connection-pool tuning.
 - Runtime controls: lightweight Admin API, richer status APIs, metrics endpoint/reset, proxy/group/client close operations, and runtime `allowPorts` updates implemented; full runtime config management remains.
 - Policy: allow ports and TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/XTCP group load balancing implemented; broader protocol group support remains.
-- Plugins: client-side local-connect HTTP hook implemented for TCP/UDP/SUDP with `op` compatibility fields; more protocol compatibility remains.
+- Plugins: server-side TCP/HTTP/HTTPS/TCPMUX new-user-connection hook and client-side local-connect HTTP hook implemented for TCP/UDP/SUDP with `op` compatibility fields; more protocol compatibility remains.
 - VirtualNet and SSH tunnel gateway: separate milestones.

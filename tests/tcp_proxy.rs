@@ -797,6 +797,113 @@ async fn server_close_proxy_plugin_receives_event() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_new_user_conn_plugin_receives_tcp_event() {
+    let _guard = acquire_test_lock().await;
+    let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let echo_port = echo.local_addr().unwrap().port();
+    let echo_task = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = echo.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut buf = [0_u8; 1024];
+                let n = stream.read(&mut buf).await.unwrap();
+                stream.write_all(&buf[..n]).await.unwrap();
+            });
+        }
+    });
+
+    let plugin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let plugin_port = plugin.local_addr().unwrap().port();
+    let (plugin_tx, plugin_rx) = oneshot::channel();
+    let plugin_task = tokio::spawn(async move {
+        let (mut stream, _) = plugin.accept().await.unwrap();
+        let mut buf = vec![0_u8; 4096];
+        let n = stream.read(&mut buf).await.unwrap();
+        let _ = plugin_tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+    });
+
+    let bind_port = unused_port();
+    let remote_port = unused_port();
+    let server_cfg = ServerConfig {
+        bind_addr: "127.0.0.1".to_string(),
+        bind_port,
+        proxy_bind_addr: "127.0.0.1".to_string(),
+        vhost_http_port: 0,
+        vhost_https_port: 0,
+        dashboard_addr: "127.0.0.1".to_string(),
+        dashboard_port: 0,
+        allow_ports: Vec::new(),
+        auth: AuthConfig {
+            token: Some("secret".to_string()),
+        },
+        plugins: ServerPluginConfig {
+            new_user_conn_url: Some(format!("http://127.0.0.1:{plugin_port}/new_user_conn")),
+            ..Default::default()
+        },
+        transport: TransportConfig::default(),
+    };
+    let server_task = tokio::spawn(server::run(server_cfg));
+    sleep(Duration::from_millis(100)).await;
+
+    let client_cfg = ClientConfig {
+        server_addr: "127.0.0.1".to_string(),
+        server_port: bind_port,
+        auth: AuthConfig {
+            token: Some("secret".to_string()),
+        },
+        pool_count: 0,
+        transport: TransportConfig::default(),
+        plugins: Default::default(),
+        proxies: vec![ProxyConfig {
+            name: "new-user-hook-echo".to_string(),
+            proxy_type: ProxyType::Tcp,
+            local_ip: "127.0.0.1".to_string(),
+            local_port: echo_port,
+            remote_port,
+            group: None,
+            group_key: None,
+            custom_domains: Vec::new(),
+            locations: Vec::new(),
+            host_header_rewrite: None,
+            request_headers: Default::default(),
+            http_user: None,
+            http_password: None,
+            bandwidth_limit: None,
+            sk: None,
+            health_check: None,
+        }],
+        visitors: Vec::new(),
+    };
+    let client_task = tokio::spawn(client::run(client_cfg));
+
+    let mut stream = connect_with_retry(format!("127.0.0.1:{remote_port}")).await;
+    stream.write_all(b"hello user hook").await.unwrap();
+    let mut got = vec![0_u8; "hello user hook".len()];
+    stream.read_exact(&mut got).await.unwrap();
+    assert_eq!(got, b"hello user hook");
+
+    let plugin_request = tokio::time::timeout(Duration::from_secs(5), plugin_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(plugin_request.contains("POST /new_user_conn HTTP/1.1"));
+    assert!(plugin_request.contains("\"op\":\"NewUserConn\""));
+    assert!(plugin_request.contains("\"proxy_name\":\"new-user-hook-echo\""));
+    assert!(plugin_request.contains("\"proxy_type\":\"tcp\""));
+    assert!(plugin_request.contains("\"user_addr\":\"127.0.0.1:"));
+    assert!(plugin_request.contains("\"remote_addr\":\"127.0.0.1:"));
+
+    client_task.abort();
+    server_task.abort();
+    echo_task.abort();
+    plugin_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dashboard_admin_closes_client_proxies() {
     let _guard = acquire_test_lock().await;
     let bind_port = unused_port();
@@ -1441,6 +1548,118 @@ async fn http_proxy_routes_by_host_header() {
     client_task.abort();
     server_task.abort();
     http_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_new_user_conn_plugin_receives_http_event() {
+    let _guard = acquire_test_lock().await;
+    let local_http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_http_port = local_http.local_addr().unwrap().port();
+    let http_task = tokio::spawn(async move {
+        let (mut stream, _) = local_http.accept().await.unwrap();
+        let mut buf = [0_u8; 1024];
+        let _ = stream.read(&mut buf).await.unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+            .await
+            .unwrap();
+    });
+
+    let plugin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let plugin_port = plugin.local_addr().unwrap().port();
+    let (plugin_tx, plugin_rx) = oneshot::channel();
+    let plugin_task = tokio::spawn(async move {
+        let (mut stream, _) = plugin.accept().await.unwrap();
+        let mut buf = vec![0_u8; 4096];
+        let n = stream.read(&mut buf).await.unwrap();
+        let _ = plugin_tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+    });
+
+    let bind_port = unused_port();
+    let vhost_port = unused_port();
+    let server_cfg = ServerConfig {
+        bind_addr: "127.0.0.1".to_string(),
+        bind_port,
+        proxy_bind_addr: "127.0.0.1".to_string(),
+        vhost_http_port: vhost_port,
+        vhost_https_port: 0,
+        dashboard_addr: "127.0.0.1".to_string(),
+        dashboard_port: 0,
+        allow_ports: Vec::new(),
+        auth: AuthConfig {
+            token: Some("secret".to_string()),
+        },
+        plugins: ServerPluginConfig {
+            new_user_conn_url: Some(format!("http://127.0.0.1:{plugin_port}/new_user_conn")),
+            ..Default::default()
+        },
+        transport: TransportConfig::default(),
+    };
+    let server_task = tokio::spawn(server::run(server_cfg));
+    sleep(Duration::from_millis(100)).await;
+
+    let client_cfg = ClientConfig {
+        server_addr: "127.0.0.1".to_string(),
+        server_port: bind_port,
+        auth: AuthConfig {
+            token: Some("secret".to_string()),
+        },
+        pool_count: 0,
+        transport: TransportConfig::default(),
+        plugins: Default::default(),
+        proxies: vec![ProxyConfig {
+            name: "http-user-hook".to_string(),
+            proxy_type: ProxyType::Http,
+            local_ip: "127.0.0.1".to_string(),
+            local_port: local_http_port,
+            remote_port: 0,
+            group: None,
+            group_key: None,
+            custom_domains: vec!["hook.example.com".to_string()],
+            locations: Vec::new(),
+            host_header_rewrite: None,
+            request_headers: Default::default(),
+            http_user: None,
+            http_password: None,
+            bandwidth_limit: None,
+            sk: None,
+            health_check: None,
+        }],
+        visitors: Vec::new(),
+    };
+    let client_task = tokio::spawn(client::run(client_cfg));
+    sleep(Duration::from_millis(300)).await;
+
+    let mut stream = connect_with_retry(format!("127.0.0.1:{vhost_port}")).await;
+    stream
+        .write_all(b"GET /hook HTTP/1.1\r\nHost: hook.example.com\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = [0_u8; 1024];
+    let n = stream.read(&mut response).await.unwrap();
+    assert!(String::from_utf8_lossy(&response[..n]).contains("200 OK"));
+
+    let plugin_request = tokio::time::timeout(Duration::from_secs(5), plugin_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(plugin_request.contains("POST /new_user_conn HTTP/1.1"));
+    assert!(plugin_request.contains("\"op\":\"NewUserConn\""));
+    assert!(plugin_request.contains("\"proxy_name\":\"http-user-hook\""));
+    assert!(plugin_request.contains("\"proxy_type\":\"http\""));
+    assert!(plugin_request.contains("\"user_addr\":\"127.0.0.1:"));
+    assert!(plugin_request.contains("\"remote_addr\":\"127.0.0.1:"));
+    assert!(plugin_request.contains("\"dst_addr\":\"hook.example.com\""));
+    assert!(plugin_request.contains("\"path\":\"/hook\""));
+
+    client_task.abort();
+    server_task.abort();
+    http_task.abort();
+    plugin_task.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2494,6 +2713,122 @@ async fn udp_proxy_batches_visitor_packets_to_client() {
         .all(|packet| packet.proxy_name == "udp-batch"));
 
     server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn udp_proxy_batches_local_responses_to_server() {
+    let _guard = acquire_test_lock().await;
+    let udp_service = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let udp_service_port = udp_service.local_addr().unwrap().port();
+    let service_task = tokio::spawn(async move {
+        let mut buf = [0_u8; 1024];
+        let (_, peer) = udp_service.recv_from(&mut buf).await.unwrap();
+        for idx in 0..4 {
+            udp_service
+                .send_to(format!("response-{idx}").as_bytes(), peer)
+                .await
+                .unwrap();
+        }
+    });
+
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bind_port = control.local_addr().unwrap().port();
+    let server_task = tokio::spawn(async move {
+        let (mut stream, _) = control.accept().await.unwrap();
+        match read_msg(&mut stream).await.unwrap() {
+            Message::Login { .. } => {}
+            other => panic!("unexpected login message: {other:?}"),
+        }
+        write_msg(
+            &mut stream,
+            &Message::LoginResp {
+                version: "test".to_string(),
+                run_id: "run-udp-batch".to_string(),
+                error: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        match read_msg(&mut stream).await.unwrap() {
+            Message::NewProxy { proxy_name, .. } if proxy_name == "udp-response-batch" => {}
+            other => panic!("unexpected new proxy message: {other:?}"),
+        }
+        write_msg(
+            &mut stream,
+            &Message::NewProxyResp {
+                proxy_name: "udp-response-batch".to_string(),
+                remote_addr: "127.0.0.1:0".to_string(),
+                error: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        write_msg(
+            &mut stream,
+            &Message::UdpPacket {
+                proxy_name: "udp-response-batch".to_string(),
+                content: b"start".to_vec(),
+                visitor_addr: "127.0.0.1:54321".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let msg = tokio::time::timeout(Duration::from_secs(1), read_msg(&mut stream))
+                .await
+                .unwrap()
+                .unwrap();
+            match msg {
+                Message::UdpPacketBatch { packets } => return packets,
+                Message::UdpPacket { .. } => {}
+                other => panic!("unexpected control message: {other:?}"),
+            }
+        }
+        panic!("client did not send UDP response batch");
+    });
+
+    let client_cfg = ClientConfig {
+        server_addr: "127.0.0.1".to_string(),
+        server_port: bind_port,
+        auth: AuthConfig { token: None },
+        pool_count: 0,
+        transport: TransportConfig::default(),
+        plugins: Default::default(),
+        proxies: vec![ProxyConfig {
+            name: "udp-response-batch".to_string(),
+            proxy_type: ProxyType::Udp,
+            local_ip: "127.0.0.1".to_string(),
+            local_port: udp_service_port,
+            remote_port: 0,
+            group: None,
+            group_key: None,
+            custom_domains: Vec::new(),
+            locations: Vec::new(),
+            host_header_rewrite: None,
+            request_headers: Default::default(),
+            http_user: None,
+            http_password: None,
+            bandwidth_limit: None,
+            sk: None,
+            health_check: None,
+        }],
+        visitors: Vec::new(),
+    };
+    let client_task = tokio::spawn(client::run(client_cfg));
+
+    let packets = server_task.await.unwrap();
+    assert!(packets.len() >= 2, "{packets:?}");
+    assert!(packets
+        .iter()
+        .all(|packet| packet.proxy_name == "udp-response-batch"));
+    assert!(packets
+        .iter()
+        .all(|packet| packet.visitor_addr == "127.0.0.1:54321"));
+
+    client_task.abort();
+    service_task.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
