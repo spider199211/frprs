@@ -29,7 +29,7 @@ This is a Rust rewrite scaffold for `fatedier/frp`.
 - TCP `group`/`groupKey` 分组负载均衡，支持多个代理共享同一远端端口
 - 通过 `poolCount` 预创建 work connection 连接池，并合并高并发下的补池请求
 - 通过 `bandwidthLimit` 对 TCP/HTTP/HTTPS 做带宽限制
-- UDP 本地会话复用、访问包批量转发和 `group`/`groupKey` 分组负载均衡
+- UDP 本地会话复用、双向批量转发、批处理热路径缓存和 `group`/`groupKey` 分组负载均衡
 - `frpc` 根据配置文件修改时间自动热加载
 - 轻量级 `frps` Dashboard，支持 `/`、`/api/status`、`/api/clients`、`/api/proxies`、`/api/groups`、`/api/metrics`
 - Dashboard Admin API 支持运行时重置指标计数
@@ -259,7 +259,7 @@ cargo run --bin frpc -- -c conf/frpc.toml
 
 - TCP：已实现基础反向代理链路和 `group`/`groupKey` 分组负载均衡。
 - HTTP：已实现按 `Host`、通配域名和 `locations` 的转发，并支持请求头改写、Basic Auth、真实 IP 请求头和分组负载均衡。
-- UDP：已实现基础请求/响应转发、本地 NAT 会话复用、双向包批量转发和分组负载均衡；更深入的包级优化仍待完善。
+- UDP：已实现基础请求/响应转发、本地 NAT 会话复用、双向包批量转发、批处理目标缓存和分组负载均衡；更深入的包级优化仍待完善。
 - HTTPS：已实现 SNI 嗅探、原始 TLS 透传、通配域名、`*` 兜底路由和分组负载均衡。
 - TCP mux：已实现基于 HTTP CONNECT 的基础隧道路由和分组负载均衡。
 - 健康检查：已实现 TCP/HTTP 健康检查，并在 Dashboard/API 中暴露代理健康状态。
@@ -271,7 +271,7 @@ cargo run --bin frpc -- -c conf/frpc.toml
 - TLS/WebSocket/QUIC/KCP：已实现真实控制/工作连接传输，并有端到端代理测试覆盖。
 - STCP/XTCP：已实现 TCP 流的私有 visitor 转发和分组负载均衡；XTCP 当前走服务端中继 fallback。
 - SUDP/XTCP/P2P：已实现服务端中继版 SUDP/XTCP visitor，并具备 NAT 控制器基础；完整 P2P 数据面仍待实现。
-- Transport：已补 TLS、WebSocket、基础 TCP mux 和 work connection 补池合并；后续继续补更完整的 mux 连接复用能力。
+- Transport/热路径：已补 TLS、WebSocket、基础 TCP mux、work connection 补池合并和 UDP 批处理缓存；后续继续补更完整的 mux 连接复用能力。
 - 运行时控制：已补轻量 Admin API、更多状态 API、指标接口、指标重置、按代理/分组/客户端关闭能力和 `allowPorts` 运行时更新；后续补更完整的运行时配置管理。
 - 策略能力：已补端口白名单和 TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/XTCP 分组负载均衡；后续补更多协议的分组能力。
 - 插件能力：已补服务端 TCP/HTTP/HTTPS/TCPMUX 新用户连接钩子、客户端 TCP/UDP/SUDP 本地连接或会话前 HTTP 钩子和 `op` 兼容字段；后续补更多协议兼容。
@@ -302,7 +302,7 @@ The current milestone implements the core reverse TCP proxy path:
 - TCP `group`/`groupKey` load balancing across multiple proxies sharing one remote port
 - pre-opened TCP work connection pools with `poolCount`, with coalesced replenish requests under concurrent load
 - TCP/HTTP/HTTPS bandwidth limiting with `bandwidthLimit`
-- UDP local session reuse, visitor-packet batching, and `group`/`groupKey` load balancing
+- UDP local session reuse, bidirectional batching, batch-path caching, and `group`/`groupKey` load balancing
 - frpc config hot reload by file modification time
 - lightweight frps dashboard at `/`, `/api/status`, `/api/clients`, `/api/proxies`, `/api/groups`, and `/api/metrics`
 - dashboard Admin API for resetting metrics counters at runtime
@@ -484,7 +484,7 @@ Parity roadmap:
 
 - TCP: first milestone and `group`/`groupKey` load balancing implemented.
 - HTTP: Host, wildcard-domain, and `locations` routing implemented, with header rewrite, Basic Auth, real-IP headers, and group load balancing.
-- UDP: basic request/response forwarding, local NAT session reuse, bidirectional packet batching, and group load balancing implemented; deeper packet-level optimizations remain.
+- UDP: basic request/response forwarding, local NAT session reuse, bidirectional packet batching, batch destination caching, and group load balancing implemented; deeper packet-level optimizations remain.
 - HTTPS: SNI sniffing, raw TLS passthrough routing, wildcard domains, `*` fallback routing, and group load balancing implemented.
 - TCP mux: basic HTTP CONNECT tunnel routing and group load balancing implemented.
 - Health checks: TCP and HTTP health checks implemented, with proxy health status exposed through the Dashboard/API.
@@ -496,7 +496,7 @@ Parity roadmap:
 - TLS/WebSocket/QUIC/KCP: real control/work transports implemented and covered by end-to-end proxy tests.
 - STCP/XTCP: private visitor flow and group load balancing implemented for TCP streams; XTCP currently uses a server-relayed fallback.
 - SUDP/XTCP/P2P: server-relayed SUDP/XTCP visitors implemented on top of the control channel; the full peer-to-peer data plane remains.
-- Transport: TLS, WebSocket, basic TCP mux, and work-connection replenish coalescing implemented; add fuller mux connection reuse and more connection-pool tuning.
+- Transport/hot paths: TLS, WebSocket, basic TCP mux, work-connection replenish coalescing, and UDP batch-path caching implemented; add fuller mux connection reuse and more connection-pool tuning.
 - Runtime controls: lightweight Admin API, richer status APIs, metrics endpoint/reset, proxy/group/client close operations, and runtime `allowPorts` updates implemented; full runtime config management remains.
 - Policy: allow ports and TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/XTCP group load balancing implemented; broader protocol group support remains.
 - Plugins: server-side TCP/HTTP/HTTPS/TCPMUX new-user-connection hook and client-side local-connect HTTP hook implemented for TCP/UDP/SUDP with `op` compatibility fields; more protocol compatibility remains.

@@ -706,39 +706,7 @@ async fn handle_udp_packet(
     content: Vec<u8>,
     visitor_addr: String,
 ) -> Result<()> {
-    let proxy = state
-        .proxies
-        .get(&proxy_name)
-        .ok_or_else(|| anyhow!("unknown udp proxy {proxy_name}"))?;
-    let local_addr = format!("{}:{}", proxy.local_ip, proxy.local_port);
-    let key = (proxy_name.clone(), visitor_addr.clone());
-    let socket = {
-        let mut sessions = state.udp_sessions.lock().await;
-        if let Some(socket) = sessions.get(&key) {
-            socket.clone()
-        } else {
-            call_client_plugin_hook(
-                state.cfg.plugins.local_connect_url.as_deref(),
-                json!({
-                    "op": "LocalConnect",
-                    "proxy_name": proxy_name.clone(),
-                    "proxy_type": proxy.proxy_type.as_str(),
-                    "local_addr": local_addr.clone(),
-                    "src_addr": visitor_addr.clone(),
-                    "dst_addr": "",
-                }),
-            )
-            .await?;
-            let socket = Arc::new(
-                UdpSocket::bind("0.0.0.0:0")
-                    .await
-                    .context("bind local udp relay socket")?,
-            );
-            sessions.insert(key.clone(), socket.clone());
-            spawn_udp_response_loop(state.clone(), key, socket.clone());
-            socket
-        }
-    };
+    let (socket, local_addr) = udp_session_for_visitor(&state, &proxy_name, &visitor_addr).await?;
     socket
         .send_to(&content, &local_addr)
         .await
@@ -746,15 +714,74 @@ async fn handle_udp_packet(
     Ok(())
 }
 
+async fn udp_session_for_visitor(
+    state: &ClientState,
+    proxy_name: &str,
+    visitor_addr: &str,
+) -> Result<(Arc<UdpSocket>, String)> {
+    let proxy = state
+        .proxies
+        .get(proxy_name)
+        .ok_or_else(|| anyhow!("unknown udp proxy {proxy_name}"))?;
+    let local_addr = format!("{}:{}", proxy.local_ip, proxy.local_port);
+    let key = (proxy_name.to_string(), visitor_addr.to_string());
+    if let Some(socket) = {
+        let sessions = state.udp_sessions.lock().await;
+        sessions.get(&key).cloned()
+    } {
+        return Ok((socket, local_addr));
+    }
+
+    call_client_plugin_hook(
+        state.cfg.plugins.local_connect_url.as_deref(),
+        json!({
+            "op": "LocalConnect",
+            "proxy_name": proxy_name,
+            "proxy_type": proxy.proxy_type.as_str(),
+            "local_addr": local_addr.clone(),
+            "src_addr": visitor_addr,
+            "dst_addr": "",
+        }),
+    )
+    .await?;
+    let socket = Arc::new(
+        UdpSocket::bind("0.0.0.0:0")
+            .await
+            .context("bind local udp relay socket")?,
+    );
+    let socket = {
+        let mut sessions = state.udp_sessions.lock().await;
+        if let Some(socket) = sessions.get(&key) {
+            socket.clone()
+        } else {
+            sessions.insert(key.clone(), socket.clone());
+            spawn_udp_response_loop((*state).clone(), key, socket.clone());
+            socket
+        }
+    };
+    Ok((socket, local_addr))
+}
+
 async fn handle_udp_packet_batch(state: ClientState, packets: Vec<UdpPacketFrame>) -> Result<()> {
-    for packet in packets {
-        handle_udp_packet(
-            state.clone(),
-            packet.proxy_name,
-            packet.content,
-            packet.visitor_addr,
-        )
-        .await?;
+    let mut sessions: HashMap<(String, String), (Arc<UdpSocket>, String)> = HashMap::new();
+    for UdpPacketFrame {
+        proxy_name,
+        content,
+        visitor_addr,
+    } in packets
+    {
+        let key = (proxy_name, visitor_addr);
+        let (socket, local_addr) = if let Some(session) = sessions.get(&key) {
+            (session.0.clone(), session.1.clone())
+        } else {
+            let session = udp_session_for_visitor(&state, &key.0, &key.1).await?;
+            sessions.insert(key.clone(), (session.0.clone(), session.1.clone()));
+            session
+        };
+        socket
+            .send_to(&content, &local_addr)
+            .await
+            .with_context(|| format!("send udp packet to local service {local_addr}"))?;
     }
     Ok(())
 }

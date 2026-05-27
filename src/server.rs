@@ -617,21 +617,7 @@ async fn register_control(
                 }
             }
             Ok(Message::UdpPacketBatch { packets }) => {
-                for packet in packets {
-                    if let Err(err) = send_udp_packet_to_visitor(
-                        state.clone(),
-                        &packet.proxy_name,
-                        &packet.content,
-                        &packet.visitor_addr,
-                    )
-                    .await
-                    {
-                        warn!(
-                            "send udp packet batch item for proxy {} failed: {err:#}",
-                            packet.proxy_name
-                        );
-                    }
-                }
+                send_udp_packet_batch_to_visitors(state.clone(), packets).await;
             }
             Ok(Message::SudpPacket {
                 proxy_name,
@@ -1508,6 +1494,68 @@ async fn send_udp_packet_to_visitor(
     content: &[u8],
     visitor_addr: &str,
 ) -> Result<()> {
+    let (socket, visitor_addr) =
+        resolve_udp_visitor_destination(&state, proxy_name, visitor_addr).await?;
+    socket
+        .send_to(content, visitor_addr)
+        .await
+        .context("send udp response to visitor")?;
+    state
+        .metrics
+        .bytes_down_total
+        .fetch_add(content.len() as u64, Ordering::Relaxed);
+    Ok(())
+}
+
+async fn send_udp_packet_batch_to_visitors(state: ServerState, packets: Vec<UdpPacketFrame>) {
+    let mut destinations: HashMap<(String, String), (Arc<UdpSocket>, SocketAddr)> = HashMap::new();
+    let mut bytes_down = 0_u64;
+
+    for packet in packets {
+        let key = (packet.proxy_name, packet.visitor_addr);
+        let destination = if let Some(destination) = destinations.get(&key) {
+            Some((destination.0.clone(), destination.1))
+        } else {
+            match resolve_udp_visitor_destination(&state, &key.0, &key.1).await {
+                Ok(destination) => {
+                    destinations.insert(key.clone(), (destination.0.clone(), destination.1));
+                    Some(destination)
+                }
+                Err(err) => {
+                    warn!(
+                        "send udp packet batch item for proxy {} failed: {err:#}",
+                        key.0
+                    );
+                    None
+                }
+            }
+        };
+        let Some((socket, visitor_addr)) = destination else {
+            continue;
+        };
+        if let Err(err) = socket.send_to(&packet.content, visitor_addr).await {
+            warn!(
+                "send udp packet batch item for proxy {} failed: {err:#}",
+                key.0
+            );
+            continue;
+        }
+        bytes_down += packet.content.len() as u64;
+    }
+
+    if bytes_down > 0 {
+        state
+            .metrics
+            .bytes_down_total
+            .fetch_add(bytes_down, Ordering::Relaxed);
+    }
+}
+
+async fn resolve_udp_visitor_destination(
+    state: &ServerState,
+    proxy_name: &str,
+    visitor_addr: &str,
+) -> Result<(Arc<UdpSocket>, SocketAddr)> {
     let socket = {
         let relays = state.udp_relays.lock().await;
         relays
@@ -1518,15 +1566,7 @@ async fn send_udp_packet_to_visitor(
     let visitor_addr = visitor_addr
         .parse::<SocketAddr>()
         .with_context(|| format!("parse udp visitor address {visitor_addr}"))?;
-    socket
-        .send_to(content, visitor_addr)
-        .await
-        .context("send udp response to visitor")?;
-    state
-        .metrics
-        .bytes_down_total
-        .fetch_add(content.len() as u64, Ordering::Relaxed);
-    Ok(())
+    Ok((socket, visitor_addr))
 }
 
 async fn handle_sudp_packet(
