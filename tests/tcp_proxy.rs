@@ -3081,7 +3081,7 @@ async fn server_udp_batch_reuses_visitor_destination() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn sudp_visitor_forwards_packets() {
+async fn sudp_visitor_forwards_packets_directly_when_peer_reachable() {
     let _guard = acquire_test_lock().await;
     let udp_echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let udp_echo_port = udp_echo.local_addr().unwrap().port();
@@ -3095,6 +3095,7 @@ async fn sudp_visitor_forwards_packets() {
 
     let bind_port = unused_port();
     let visitor_port = unused_port();
+    let dashboard_port = unused_port();
     let server_cfg = ServerConfig {
         bind_addr: "127.0.0.1".to_string(),
         bind_port,
@@ -3102,7 +3103,7 @@ async fn sudp_visitor_forwards_packets() {
         vhost_http_port: 0,
         vhost_https_port: 0,
         dashboard_addr: "127.0.0.1".to_string(),
-        dashboard_port: 0,
+        dashboard_port,
         allow_ports: Vec::new(),
         auth: AuthConfig {
             token: Some("secret".to_string()),
@@ -3177,6 +3178,14 @@ async fn sudp_visitor_forwards_packets() {
         .unwrap()
         .unwrap();
     assert_eq!(&buf[..n], b"hello sudp");
+
+    let metrics = http_request(
+        format!("127.0.0.1:{dashboard_port}"),
+        b"GET /api/metrics HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )
+    .await;
+    assert!(metrics.contains("\"bytes_up_total\":0"));
+    assert!(metrics.contains("\"bytes_down_total\":0"));
 
     visitor_task.abort();
     owner_task.abort();

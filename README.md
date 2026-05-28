@@ -38,7 +38,7 @@ This is a Rust rewrite scaffold for `fatedier/frp`.
 - 客户端 `localConnectURL` HTTP 插件钩子，支持 TCP/UDP/SUDP 本地连接或会话前放行/拒绝，并在 payload 中带 `op`
 - STCP/XTCP 私有 visitor 协议，支持 `sk` 密钥校验和本地 visitor 监听；XTCP 可在 peer 可达时直连，失败时回退服务端中继
 - STCP/XTCP `group`/`groupKey` 私有服务分组负载均衡，visitor 可通过分组名轮询访问后端
-- SUDP 私有 visitor 协议，支持 `sk` 密钥校验和服务端中继 UDP 包转发
+- SUDP 私有 visitor 协议，支持 `sk` 密钥校验、peer 可达时直连 UDP 转发和服务端中继 fallback
 - NAT 打洞控制器和控制通道候选地址交换消息
 - 通过 `transport.protocol` 支持 TCP、TLS、WebSocket、QUIC、KCP 控制/工作连接传输
 - 按 visitor 请求 work connection
@@ -270,7 +270,7 @@ cargo run --bin frpc -- -c conf/frpc.toml
 - 热加载：`frpc` 会监听配置文件修改时间并自动重连。
 - TLS/WebSocket/QUIC/KCP：已实现真实控制/工作连接传输，并有端到端代理测试覆盖。
 - STCP/XTCP：已实现 TCP 流的私有 visitor 转发和分组负载均衡；XTCP 已支持可达 peer 的直连数据面，并保留服务端中继 fallback。
-- SUDP/XTCP/P2P：已实现服务端中继版 SUDP visitor、XTCP 直连优先路径和 NAT 控制器基础；更完整的 NAT 打洞协商、候选探测和 UDP P2P 数据面仍待实现。
+- SUDP/XTCP/P2P：已实现 XTCP/SUDP 直连优先数据面、服务端中继 fallback 和 NAT 控制器基础；更完整的 NAT 打洞协商、候选探测和复杂 NAT 场景仍待实现。
 - Transport/热路径：已补 TLS、WebSocket、基础 TCP mux、work connection 补池合并和 UDP 批处理缓存；后续继续补更完整的 mux 连接复用能力。
 - 运行时控制：已补轻量 Admin API、更多状态 API、指标接口、指标重置、按代理/分组/客户端关闭能力和 `allowPorts` 运行时更新；后续补更完整的运行时配置管理。
 - 策略能力：已补端口白名单和 TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/XTCP 分组负载均衡；后续补更多协议的分组能力。
@@ -311,7 +311,7 @@ The current milestone implements the core reverse TCP proxy path:
 - client-side `localConnectURL` HTTP plugin hook before TCP/UDP/SUDP local connects or sessions, with `op` in payloads
 - STCP/XTCP private visitor protocols with `sk` authentication and local visitor listeners; XTCP connects directly when the peer is reachable and falls back to server relay otherwise
 - STCP/XTCP `group`/`groupKey` load balancing, allowing visitors to target a private service group
-- SUDP private visitor protocol with `sk` authentication and server-relayed UDP forwarding
+- SUDP private visitor protocol with `sk` authentication, direct UDP forwarding when the peer is reachable, and server-relay fallback
 - NAT hole punching controller and control-channel candidate exchange messages
 - TCP, TLS, WebSocket, QUIC, and KCP control/work transports via `transport.protocol`
 - per-visitor work connection request
@@ -495,7 +495,7 @@ Parity roadmap:
 - Hot reload: frpc watches config file mtime and reconnects on change.
 - TLS/WebSocket/QUIC/KCP: real control/work transports implemented and covered by end-to-end proxy tests.
 - STCP/XTCP: private visitor flow and group load balancing implemented for TCP streams; XTCP now has a direct data path for reachable peers plus server-relay fallback.
-- SUDP/XTCP/P2P: server-relayed SUDP visitors, XTCP direct-first data path, and the NAT controller foundation are implemented; fuller NAT-hole negotiation, candidate probing, and UDP P2P data plane remain.
+- SUDP/XTCP/P2P: XTCP/SUDP direct-first data paths, server-relay fallback, and the NAT controller foundation are implemented; fuller NAT-hole negotiation, candidate probing, and complex NAT scenarios remain.
 - Transport/hot paths: TLS, WebSocket, basic TCP mux, work-connection replenish coalescing, and UDP batch-path caching implemented; add fuller mux connection reuse and more connection-pool tuning.
 - Runtime controls: lightweight Admin API, richer status APIs, metrics endpoint/reset, proxy/group/client close operations, and runtime `allowPorts` updates implemented; full runtime config management remains.
 - Policy: allow ports and TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/XTCP group load balancing implemented; broader protocol group support remains.
