@@ -18,7 +18,7 @@ use std::{
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt, WriteHalf},
     net::{TcpListener, TcpStream, UdpSocket},
-    sync::Mutex,
+    sync::{oneshot, Mutex},
     time,
 };
 use tracing::{debug, error, info, warn};
@@ -30,6 +30,7 @@ struct ClientState {
     proxies: Arc<HashMap<String, ProxyConfig>>,
     udp_sessions: Arc<Mutex<HashMap<(String, String), Arc<UdpSocket>>>>,
     sudp_visitor_sessions: Arc<Mutex<HashMap<String, SudpVisitorSession>>>,
+    nat_hole_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<NatHoleResponse>>>>,
     writer: Arc<Mutex<WriteHalf<BoxStream>>>,
 }
 
@@ -37,6 +38,14 @@ struct ClientState {
 struct SudpVisitorSession {
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
+}
+
+#[derive(Debug)]
+struct NatHoleResponse {
+    peer_observed_addr: String,
+    peer_local_addrs: Vec<String>,
+    waiting: bool,
+    error: String,
 }
 
 impl ClientState {
@@ -135,10 +144,14 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
         proxies,
         udp_sessions: Arc::new(Mutex::new(HashMap::new())),
         sudp_visitor_sessions: Arc::new(Mutex::new(HashMap::new())),
+        nat_hole_waiters: Arc::new(Mutex::new(HashMap::new())),
         writer: Arc::new(Mutex::new(writer)),
     };
 
     for proxy in state.proxies.values().cloned() {
+        if proxy.proxy_type == ProxyType::Xtcp {
+            start_xtcp_direct_owner_listener(state.clone(), proxy.clone()).await?;
+        }
         if proxy.health_check.is_some() {
             let health_state = state.clone();
             tokio::spawn(async move {
@@ -242,6 +255,30 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
             Message::Pong { error } => {
                 bail!("server rejected ping: {error}");
             }
+            Message::NatHoleResp {
+                transaction_id,
+                role,
+                observed_addr: _,
+                peer_observed_addr,
+                peer_local_addrs,
+                waiting,
+                error,
+                ..
+            } => {
+                let key = nat_hole_waiter_key(&transaction_id, &role);
+                if let Some(waiter) = state.nat_hole_waiters.lock().await.remove(&key) {
+                    let _ = waiter.send(NatHoleResponse {
+                        peer_observed_addr,
+                        peer_local_addrs,
+                        waiting,
+                        error,
+                    });
+                } else {
+                    debug!(
+                        "ignored nat hole response for transaction {transaction_id} role {role}"
+                    );
+                }
+            }
             other => {
                 debug!("ignored server message: {other:?}");
             }
@@ -331,6 +368,63 @@ async fn close_proxy(state: &ClientState, proxy_name: &str) -> Result<()> {
         .await
 }
 
+fn nat_hole_waiter_key(transaction_id: &str, role: &str) -> String {
+    format!("{transaction_id}|{role}")
+}
+
+async fn request_nat_hole(
+    state: &ClientState,
+    transaction_id: &str,
+    proxy_name: &str,
+    role: &str,
+    local_addrs: Vec<String>,
+) -> Result<NatHoleResponse> {
+    let (tx, rx) = oneshot::channel();
+    let key = nat_hole_waiter_key(transaction_id, role);
+    state.nat_hole_waiters.lock().await.insert(key.clone(), tx);
+    let send_result = state
+        .send(&Message::NatHoleRegister {
+            transaction_id: transaction_id.to_string(),
+            proxy_name: proxy_name.to_string(),
+            role: role.to_string(),
+            local_addrs,
+        })
+        .await;
+    if let Err(err) = send_result {
+        state.nat_hole_waiters.lock().await.remove(&key);
+        return Err(err);
+    }
+
+    let resp = match time::timeout(Duration::from_secs(5), rx).await {
+        Ok(resp) => resp.context("nat hole response channel closed")?,
+        Err(err) => {
+            state.nat_hole_waiters.lock().await.remove(&key);
+            return Err(err).context("wait for nat hole response timed out");
+        }
+    };
+    if !resp.error.is_empty() {
+        bail!("nat hole register failed: {}", resp.error);
+    }
+    Ok(resp)
+}
+
+async fn announce_nat_hole(
+    state: &ClientState,
+    transaction_id: &str,
+    proxy_name: &str,
+    role: &str,
+    local_addrs: Vec<String>,
+) -> Result<()> {
+    state
+        .send(&Message::NatHoleRegister {
+            transaction_id: transaction_id.to_string(),
+            proxy_name: proxy_name.to_string(),
+            role: role.to_string(),
+            local_addrs,
+        })
+        .await
+}
+
 async fn run_visitor_listener(state: ClientState, visitor: VisitorConfig) -> Result<()> {
     match visitor.visitor_type {
         ProxyType::Stcp | ProxyType::Xtcp => {}
@@ -380,6 +474,12 @@ async fn handle_stcp_visitor(
     visitor: VisitorConfig,
     mut inbound: TcpStream,
 ) -> Result<()> {
+    if visitor.visitor_type == ProxyType::Xtcp
+        && try_xtcp_direct_visitor(&state, &visitor, &mut inbound).await?
+    {
+        return Ok(());
+    }
+
     let server_addr = state.cfg.server_addr();
     let mut stream = connect_control(&state.cfg)
         .await
@@ -406,6 +506,209 @@ async fn handle_stcp_visitor(
         .await
         .with_context(|| format!("copy stcp visitor bytes for {}", visitor.name))?;
     Ok(())
+}
+
+async fn start_xtcp_direct_owner_listener(state: ClientState, proxy: ProxyConfig) -> Result<()> {
+    let bind_ip = proxy.local_ip.as_str();
+    let listener = TcpListener::bind(format!("{bind_ip}:0"))
+        .await
+        .with_context(|| format!("listen xtcp direct owner {}", proxy.name))?;
+    let local_addr = listener
+        .local_addr()
+        .context("read xtcp direct owner addr")?;
+    let advertised_addr = local_addr.to_string();
+
+    announce_nat_hole(
+        &state,
+        &proxy.name,
+        &proxy.name,
+        "server",
+        vec![advertised_addr.clone()],
+    )
+    .await?;
+    if let Some(group) = proxy.group.as_deref() {
+        announce_nat_hole(
+            &state,
+            group,
+            group,
+            "server",
+            vec![advertised_addr.clone()],
+        )
+        .await?;
+    }
+
+    info!(
+        "xtcp direct owner {} listening on {}",
+        proxy.name, advertised_addr
+    );
+    tokio::spawn(async move {
+        loop {
+            let (stream, peer) = match listener.accept().await {
+                Ok(accepted) => accepted,
+                Err(err) => {
+                    debug!("xtcp direct owner {} accept failed: {err:#}", proxy.name);
+                    break;
+                }
+            };
+            configure_tcp_stream(&stream);
+            let proxy = proxy.clone();
+            tokio::spawn(async move {
+                if let Err(err) = handle_xtcp_direct_owner_conn(proxy, stream).await {
+                    debug!("xtcp direct owner connection {peer} failed: {err:#}");
+                }
+            });
+        }
+    });
+    Ok(())
+}
+
+async fn handle_xtcp_direct_owner_conn(proxy: ProxyConfig, mut stream: TcpStream) -> Result<()> {
+    let requested_proxy = match read_msg(&mut stream).await? {
+        Message::NewVisitorConn { proxy_name, sk, .. } => {
+            let allowed_name = proxy_name == proxy.name
+                || proxy
+                    .group
+                    .as_deref()
+                    .map(|group| group == proxy_name)
+                    .unwrap_or(false);
+            if !allowed_name {
+                write_msg(
+                    &mut stream,
+                    &Message::NewVisitorConnResp {
+                        proxy_name,
+                        error: "xtcp proxy is not registered on direct peer".to_string(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            if proxy.sk != sk {
+                write_msg(
+                    &mut stream,
+                    &Message::NewVisitorConnResp {
+                        proxy_name,
+                        error: "xtcp secret key mismatch".to_string(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            proxy_name
+        }
+        other => bail!("unexpected xtcp direct handshake: {other:?}"),
+    };
+
+    write_msg(
+        &mut stream,
+        &Message::NewVisitorConnResp {
+            proxy_name: requested_proxy.clone(),
+            error: String::new(),
+        },
+    )
+    .await?;
+    let local_addr = format!("{}:{}", proxy.local_ip, proxy.local_port);
+    let mut local = TcpStream::connect(&local_addr)
+        .await
+        .with_context(|| format!("connect local xtcp service at {local_addr}"))?;
+    configure_tcp_stream(&local);
+    io::copy_bidirectional(&mut stream, &mut local)
+        .await
+        .with_context(|| format!("copy xtcp direct bytes for {requested_proxy}"))?;
+    Ok(())
+}
+
+async fn try_xtcp_direct_visitor(
+    state: &ClientState,
+    visitor: &VisitorConfig,
+    inbound: &mut TcpStream,
+) -> Result<bool> {
+    let resp = match request_nat_hole(
+        state,
+        &visitor.server_name,
+        &visitor.server_name,
+        "visitor",
+        Vec::new(),
+    )
+    .await
+    {
+        Ok(resp) => resp,
+        Err(err) => {
+            debug!(
+                "xtcp direct lookup for {} failed: {err:#}",
+                visitor.server_name
+            );
+            return Ok(false);
+        }
+    };
+    if resp.waiting {
+        debug!("xtcp direct lookup for {} is waiting", visitor.server_name);
+        return Ok(false);
+    }
+
+    let candidates = xtcp_direct_candidates(&resp);
+    for candidate in candidates {
+        let Ok(addr) = candidate.parse::<SocketAddr>() else {
+            debug!("ignore invalid xtcp direct candidate {candidate}");
+            continue;
+        };
+        let connect = time::timeout(Duration::from_secs(2), TcpStream::connect(addr)).await;
+        let mut peer = match connect {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(err)) => {
+                debug!("xtcp direct connect {candidate} failed: {err:#}");
+                continue;
+            }
+            Err(_) => {
+                debug!("xtcp direct connect {candidate} timed out");
+                continue;
+            }
+        };
+        configure_tcp_stream(&peer);
+        write_msg(
+            &mut peer,
+            &Message::NewVisitorConn {
+                proxy_name: visitor.server_name.clone(),
+                sk: visitor.sk.clone(),
+                token: None,
+            },
+        )
+        .await?;
+        match read_msg(&mut peer).await? {
+            Message::NewVisitorConnResp { error, .. } if error.is_empty() => {
+                info!(
+                    "xtcp visitor {} connected directly to {}",
+                    visitor.name, candidate
+                );
+                io::copy_bidirectional(inbound, &mut peer)
+                    .await
+                    .with_context(|| {
+                        format!("copy xtcp direct visitor bytes for {}", visitor.name)
+                    })?;
+                return Ok(true);
+            }
+            Message::NewVisitorConnResp { error, .. } => {
+                debug!("xtcp direct peer {candidate} rejected visitor: {error}");
+            }
+            other => {
+                debug!("unexpected xtcp direct response from {candidate}: {other:?}");
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn xtcp_direct_candidates(resp: &NatHoleResponse) -> Vec<String> {
+    let mut out = Vec::new();
+    for addr in &resp.peer_local_addrs {
+        if !out.contains(addr) {
+            out.push(addr.clone());
+        }
+    }
+    if !resp.peer_observed_addr.is_empty() && !out.contains(&resp.peer_observed_addr) {
+        out.push(resp.peer_observed_addr.clone());
+    }
+    out
 }
 
 async fn run_sudp_visitor_listener(state: ClientState, visitor: VisitorConfig) -> Result<()> {

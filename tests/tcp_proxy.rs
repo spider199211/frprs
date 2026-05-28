@@ -1224,7 +1224,7 @@ async fn stcp_visitor_forwards_bytes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn xtcp_visitor_forwards_bytes_with_server_relay() {
+async fn xtcp_visitor_forwards_bytes_directly_when_peer_reachable() {
     let _guard = acquire_test_lock().await;
     let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let echo_port = echo.local_addr().unwrap().port();
@@ -1246,6 +1246,7 @@ async fn xtcp_visitor_forwards_bytes_with_server_relay() {
 
     let bind_port = unused_port();
     let visitor_port = unused_port();
+    let dashboard_port = unused_port();
     let server_cfg = ServerConfig {
         bind_addr: "127.0.0.1".to_string(),
         bind_port,
@@ -1253,7 +1254,7 @@ async fn xtcp_visitor_forwards_bytes_with_server_relay() {
         vhost_http_port: 0,
         vhost_https_port: 0,
         dashboard_addr: "127.0.0.1".to_string(),
-        dashboard_port: 0,
+        dashboard_port,
         allow_ports: Vec::new(),
         auth: AuthConfig {
             token: Some("secret".to_string()),
@@ -1323,6 +1324,13 @@ async fn xtcp_visitor_forwards_bytes_with_server_relay() {
     let mut got = vec![0_u8; "hello xtcp".len()];
     stream.read_exact(&mut got).await.unwrap();
     assert_eq!(got, b"hello xtcp");
+
+    let metrics = http_request(
+        format!("127.0.0.1:{dashboard_port}"),
+        b"GET /api/metrics HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )
+    .await;
+    assert!(metrics.contains("\"visitor_connections_total\":0"));
 
     visitor_task.abort();
     owner_task.abort();
