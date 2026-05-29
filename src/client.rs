@@ -33,6 +33,7 @@ struct ClientState {
     proxies: Arc<HashMap<String, ProxyConfig>>,
     udp_sessions: Arc<Mutex<HashMap<(String, String), Arc<UdpSocket>>>>,
     sudp_visitor_sessions: Arc<Mutex<HashMap<String, SudpVisitorSession>>>,
+    sudp_direct_owner_sockets: Arc<Mutex<HashMap<String, Arc<UdpSocket>>>>,
     sudp_direct_visitor_sockets: Arc<Mutex<HashMap<String, Arc<UdpSocket>>>>,
     sudp_direct_visitor_peers: Arc<Mutex<HashMap<String, SocketAddr>>>,
     sudp_direct_pending: Arc<Mutex<HashMap<String, VecDeque<DirectSudpFrame>>>>,
@@ -171,6 +172,7 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
         proxies,
         udp_sessions: Arc::new(Mutex::new(HashMap::new())),
         sudp_visitor_sessions: Arc::new(Mutex::new(HashMap::new())),
+        sudp_direct_owner_sockets: Arc::new(Mutex::new(HashMap::new())),
         sudp_direct_visitor_sockets: Arc::new(Mutex::new(HashMap::new())),
         sudp_direct_visitor_peers: Arc::new(Mutex::new(HashMap::new())),
         sudp_direct_pending: Arc::new(Mutex::new(HashMap::new())),
@@ -291,6 +293,7 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
             }
             Message::NatHoleResp {
                 transaction_id,
+                proxy_name,
                 role,
                 observed_addr: _,
                 peer_observed_addr,
@@ -302,6 +305,7 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
                 handle_nat_hole_response(
                     &state,
                     transaction_id,
+                    proxy_name,
                     role,
                     NatHoleResponse {
                         peer_observed_addr,
@@ -408,6 +412,7 @@ fn nat_hole_waiter_key(transaction_id: &str, role: &str) -> String {
 async fn handle_nat_hole_response(
     state: &ClientState,
     transaction_id: String,
+    proxy_name: String,
     role: String,
     resp: NatHoleResponse,
 ) {
@@ -419,6 +424,13 @@ async fn handle_nat_hole_response(
     if resp.waiting || !resp.error.is_empty() {
         debug!("ignored nat hole response for transaction {transaction_id} role {role}");
         return;
+    }
+    if role.eq_ignore_ascii_case("server") {
+        if let Err(err) =
+            punch_sudp_owner_candidates(state, &proxy_name, &transaction_id, &resp).await
+        {
+            debug!("sudp owner punch for {proxy_name}/{transaction_id} failed: {err:#}");
+        }
     }
     state.nat_hole_cached.lock().await.insert(key, resp);
 }
@@ -464,6 +476,50 @@ async fn request_nat_hole(
         bail!("nat hole register failed: {}", resp.error);
     }
     Ok(resp)
+}
+
+async fn punch_sudp_owner_candidates(
+    state: &ClientState,
+    proxy_name: &str,
+    transaction_id: &str,
+    resp: &NatHoleResponse,
+) -> Result<()> {
+    let Some(proxy) = state.proxies.get(proxy_name) else {
+        return Ok(());
+    };
+    if proxy.proxy_type != ProxyType::Sudp {
+        return Ok(());
+    }
+    let Some(socket) = state
+        .sudp_direct_owner_sockets
+        .lock()
+        .await
+        .get(proxy_name)
+        .cloned()
+    else {
+        return Ok(());
+    };
+    let frame = DirectSudpFrame {
+        magic: DIRECT_SUDP_MAGIC.to_string(),
+        proxy_name: proxy.name.clone(),
+        session_id: transaction_id.to_string(),
+        content: Vec::new(),
+        sk: None,
+        from_visitor: false,
+        ack: true,
+        probe: true,
+    };
+    let payload = serde_json::to_vec(&frame).context("encode sudp owner punch probe")?;
+    for candidate in direct_candidates(resp) {
+        let Ok(addr) = candidate.parse::<SocketAddr>() else {
+            debug!("ignore invalid sudp owner punch candidate {candidate}");
+            continue;
+        };
+        if let Err(err) = socket.send_to(&payload, addr).await {
+            debug!("sudp owner punch to {candidate} failed: {err:#}");
+        }
+    }
+    Ok(())
 }
 
 async fn announce_nat_hole(
@@ -923,6 +979,11 @@ async fn start_sudp_direct_owner_listener(state: ClientState, proxy: ProxyConfig
         .local_addr()
         .context("read sudp direct owner addr")?
         .to_string();
+    state
+        .sudp_direct_owner_sockets
+        .lock()
+        .await
+        .insert(proxy.name.clone(), socket.clone());
     announce_nat_hole(
         &state,
         &proxy.name,
@@ -942,6 +1003,10 @@ async fn start_sudp_direct_owner_listener(state: ClientState, proxy: ProxyConfig
         loop {
             let (n, peer) = match socket.recv_from(&mut buf).await {
                 Ok(received) => received,
+                Err(err) if err.kind() == std::io::ErrorKind::ConnectionReset => {
+                    debug!("sudp direct owner ignored udp reset: {err:#}");
+                    continue;
+                }
                 Err(err) => {
                     debug!("sudp direct owner {} recv failed: {err:#}", proxy.name);
                     break;
@@ -1960,6 +2025,7 @@ mod tests {
             proxies: Arc::new(HashMap::new()),
             udp_sessions: Arc::new(Mutex::new(HashMap::new())),
             sudp_visitor_sessions: Arc::new(Mutex::new(HashMap::new())),
+            sudp_direct_owner_sockets: Arc::new(Mutex::new(HashMap::new())),
             sudp_direct_visitor_sockets: Arc::new(Mutex::new(HashMap::new())),
             sudp_direct_visitor_peers: Arc::new(Mutex::new(HashMap::new())),
             sudp_direct_pending: Arc::new(Mutex::new(HashMap::new())),
@@ -2001,6 +2067,7 @@ mod tests {
         handle_nat_hole_response(
             &state,
             "tx-cache".to_string(),
+            "xtcp-ssh".to_string(),
             "server".to_string(),
             NatHoleResponse {
                 peer_observed_addr: "127.0.0.1:7002".to_string(),
@@ -2051,6 +2118,64 @@ mod tests {
             .lock()
             .await
             .contains_key(&nat_hole_waiter_key("tx-cache", "visitor")));
+    }
+
+    #[tokio::test]
+    async fn sudp_owner_punches_candidates_from_async_nat_notification() {
+        let (mut state, _server) = test_state();
+        let proxy = ProxyConfig {
+            name: "sudp-echo".to_string(),
+            proxy_type: ProxyType::Sudp,
+            local_ip: "127.0.0.1".to_string(),
+            local_port: 7001,
+            remote_port: 0,
+            group: None,
+            group_key: None,
+            custom_domains: Vec::new(),
+            locations: Vec::new(),
+            host_header_rewrite: None,
+            request_headers: Default::default(),
+            http_user: None,
+            http_password: None,
+            bandwidth_limit: None,
+            sk: Some("secret".to_string()),
+            health_check: None,
+        };
+        state.proxies = Arc::new(HashMap::from([(proxy.name.clone(), proxy)]));
+        let owner_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        state
+            .sudp_direct_owner_sockets
+            .lock()
+            .await
+            .insert("sudp-echo".to_string(), owner_socket);
+        let visitor_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let visitor_addr = visitor_socket.local_addr().unwrap().to_string();
+
+        handle_nat_hole_response(
+            &state,
+            "sudp-echo".to_string(),
+            "sudp-echo".to_string(),
+            "server".to_string(),
+            NatHoleResponse {
+                peer_observed_addr: String::new(),
+                peer_local_addrs: vec![visitor_addr],
+                waiting: false,
+                error: String::new(),
+            },
+        )
+        .await;
+
+        let mut buf = vec![0_u8; 1024];
+        let (n, _) = time::timeout(Duration::from_secs(1), visitor_socket.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        let frame = parse_sudp_direct_frame(&buf[..n]).unwrap();
+        assert_eq!(frame.proxy_name, "sudp-echo");
+        assert_eq!(frame.session_id, "sudp-echo");
+        assert!(frame.ack);
+        assert!(frame.probe);
+        assert!(!frame.from_visitor);
     }
 
     #[test]
