@@ -211,12 +211,17 @@ impl WorkPool {
     }
 
     fn reserve_missing(&self, target: usize) -> usize {
-        let available = self.available();
-        if available >= target {
-            return 0;
-        }
-        let missing = target - available;
-        self.pending.fetch_add(missing, Ordering::AcqRel);
+        let mut missing = 0;
+        let _ = self
+            .pending
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                let available = self.queued.load(Ordering::Acquire).saturating_add(pending);
+                if available >= target {
+                    return None;
+                }
+                missing = target - available;
+                Some(pending.saturating_add(missing))
+            });
         missing
     }
 
@@ -2806,7 +2811,7 @@ async fn acquire_work_conn(control: &Arc<Control>) -> Result<BoxStream> {
     }
 
     let waiters = control.work_pool.waiters.fetch_add(1, Ordering::AcqRel) + 1;
-    let target = control.pool_count.saturating_add(waiters).max(1);
+    let target = waiters.max(1);
     if let Err(err) = request_work_conns(control, target).await {
         control.work_pool.waiters.fetch_sub(1, Ordering::AcqRel);
         return Err(err);
@@ -3638,6 +3643,38 @@ mod tests {
         assert!(second.is_err(), "unexpected duplicate replenish request");
         assert_eq!(control.work_pool.pending.load(Ordering::Acquire), 3);
         assert!(!control.work_pool.replenishing.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn work_pool_waiters_request_only_immediate_demand() {
+        let (control, mut server) = test_control(3);
+
+        let first_control = control.clone();
+        let first = tokio::spawn(async move { acquire_work_conn(&first_control).await });
+        let second_control = control.clone();
+        let second = tokio::spawn(async move { acquire_work_conn(&second_control).await });
+
+        let mut requested = 0;
+        for _ in 0..2 {
+            match time::timeout(Duration::from_secs(1), read_msg(&mut server))
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                Message::ReqWorkConn { count } => requested += count,
+                other => panic!("unexpected message: {other:?}"),
+            }
+        }
+        assert_eq!(requested, 2);
+        assert_eq!(control.work_pool.pending.load(Ordering::Acquire), 2);
+
+        for _ in 0..2 {
+            let (client, _server) = duplex(64);
+            control.work_pool.push(Box::new(client)).await;
+        }
+
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
     }
 }
 
