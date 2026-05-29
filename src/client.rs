@@ -38,6 +38,7 @@ struct ClientState {
     sudp_direct_visitor_peers: Arc<Mutex<HashMap<String, SocketAddr>>>,
     sudp_direct_pending: Arc<Mutex<HashMap<String, VecDeque<DirectSudpFrame>>>>,
     sudp_direct_confirmed: Arc<Mutex<HashSet<String>>>,
+    sudp_direct_probe_sessions: Arc<Mutex<HashSet<String>>>,
     nat_hole_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<NatHoleResponse>>>>,
     nat_hole_cached: Arc<Mutex<HashMap<String, NatHoleResponse>>>,
     writer: Arc<Mutex<WriteHalf<BoxStream>>>,
@@ -177,6 +178,7 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
         sudp_direct_visitor_peers: Arc::new(Mutex::new(HashMap::new())),
         sudp_direct_pending: Arc::new(Mutex::new(HashMap::new())),
         sudp_direct_confirmed: Arc::new(Mutex::new(HashSet::new())),
+        sudp_direct_probe_sessions: Arc::new(Mutex::new(HashSet::new())),
         nat_hole_waiters: Arc::new(Mutex::new(HashMap::new())),
         nat_hole_cached: Arc::new(Mutex::new(HashMap::new())),
         writer: Arc::new(Mutex::new(writer)),
@@ -1238,31 +1240,120 @@ async fn try_sudp_direct_visitor(
             false,
         ));
 
-    let frame = sudp_direct_visitor_frame(visitor, session_id, Vec::new(), true);
-    let payload = serde_json::to_vec(&frame).context("encode sudp direct probe")?;
-    let mut sent = false;
+    let mut candidates = Vec::new();
     for candidate in direct_candidates(&resp) {
         let Ok(addr) = candidate.parse::<SocketAddr>() else {
             debug!("ignore invalid sudp direct candidate {candidate}");
             continue;
         };
-        match direct_socket.send_to(&payload, addr).await {
+        candidates.push(addr);
+    }
+    let sent = send_sudp_direct_probe(&direct_socket, visitor, session_id, &candidates).await?;
+    if !sent {
+        remove_sudp_pending_payload(state, session_id, content).await;
+    } else {
+        schedule_sudp_direct_probe_retries(
+            state.clone(),
+            visitor.clone(),
+            session_id.to_string(),
+            candidates,
+        );
+    }
+    Ok(sent)
+}
+
+async fn send_sudp_direct_probe(
+    socket: &UdpSocket,
+    visitor: &VisitorConfig,
+    session_id: &str,
+    candidates: &[SocketAddr],
+) -> Result<bool> {
+    let frame = sudp_direct_visitor_frame(visitor, session_id, Vec::new(), true);
+    let payload = serde_json::to_vec(&frame).context("encode sudp direct probe")?;
+    let mut sent = false;
+    for addr in candidates {
+        match socket.send_to(&payload, addr).await {
             Ok(_) => {
                 debug!(
                     "sudp visitor {} sent direct probe to {}",
-                    visitor.name, candidate
+                    visitor.name, addr
                 );
                 sent = true;
             }
             Err(err) => {
-                debug!("sudp direct probe to {candidate} failed: {err:#}");
+                debug!("sudp direct probe to {addr} failed: {err:#}");
             }
         }
     }
-    if !sent {
-        remove_sudp_pending_payload(state, session_id, content).await;
-    }
     Ok(sent)
+}
+
+fn schedule_sudp_direct_probe_retries(
+    state: ClientState,
+    visitor: VisitorConfig,
+    session_id: String,
+    candidates: Vec<SocketAddr>,
+) {
+    if candidates.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        {
+            let mut sessions = state.sudp_direct_probe_sessions.lock().await;
+            if !sessions.insert(session_id.clone()) {
+                return;
+            }
+        }
+
+        for delay in [
+            Duration::from_millis(120),
+            Duration::from_millis(260),
+            Duration::from_millis(520),
+        ] {
+            time::sleep(delay).await;
+            if state
+                .sudp_direct_confirmed
+                .lock()
+                .await
+                .contains(&session_id)
+                || state
+                    .sudp_direct_visitor_peers
+                    .lock()
+                    .await
+                    .contains_key(&session_id)
+                || !state
+                    .sudp_direct_pending
+                    .lock()
+                    .await
+                    .contains_key(&session_id)
+            {
+                break;
+            }
+
+            let socket = {
+                state
+                    .sudp_direct_visitor_sockets
+                    .lock()
+                    .await
+                    .get(&session_id)
+                    .cloned()
+            };
+            let Some(socket) = socket else {
+                break;
+            };
+            if let Err(err) =
+                send_sudp_direct_probe(&socket, &visitor, &session_id, &candidates).await
+            {
+                debug!("sudp direct probe retry failed: {err:#}");
+            }
+        }
+
+        state
+            .sudp_direct_probe_sessions
+            .lock()
+            .await
+            .remove(&session_id);
+    });
 }
 
 fn sudp_direct_visitor_frame(
@@ -1417,6 +1508,11 @@ fn spawn_sudp_direct_visitor_response_loop(
             .remove(&session_id);
         state.sudp_direct_pending.lock().await.remove(&session_id);
         state.sudp_direct_confirmed.lock().await.remove(&session_id);
+        state
+            .sudp_direct_probe_sessions
+            .lock()
+            .await
+            .remove(&session_id);
     });
 }
 
@@ -2030,6 +2126,7 @@ mod tests {
             sudp_direct_visitor_peers: Arc::new(Mutex::new(HashMap::new())),
             sudp_direct_pending: Arc::new(Mutex::new(HashMap::new())),
             sudp_direct_confirmed: Arc::new(Mutex::new(HashSet::new())),
+            sudp_direct_probe_sessions: Arc::new(Mutex::new(HashSet::new())),
             nat_hole_waiters: Arc::new(Mutex::new(HashMap::new())),
             nat_hole_cached: Arc::new(Mutex::new(HashMap::new())),
             writer: Arc::new(Mutex::new(writer)),
@@ -2176,6 +2273,70 @@ mod tests {
         assert!(frame.ack);
         assert!(frame.probe);
         assert!(!frame.from_visitor);
+    }
+
+    #[tokio::test]
+    async fn sudp_direct_probe_retries_until_confirmed() {
+        let (state, _server) = test_state();
+        let session_id = "visitor|127.0.0.1:50001".to_string();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        state
+            .sudp_direct_visitor_sockets
+            .lock()
+            .await
+            .insert(session_id.clone(), socket);
+        state.sudp_direct_pending.lock().await.insert(
+            session_id.clone(),
+            VecDeque::from([sudp_direct_visitor_frame(
+                &VisitorConfig {
+                    name: "visitor".to_string(),
+                    visitor_type: ProxyType::Sudp,
+                    server_name: "sudp-echo".to_string(),
+                    bind_addr: "127.0.0.1".to_string(),
+                    bind_port: 0,
+                    sk: Some("secret".to_string()),
+                },
+                &session_id,
+                b"hello".to_vec(),
+                false,
+            )]),
+        );
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let visitor = VisitorConfig {
+            name: "visitor".to_string(),
+            visitor_type: ProxyType::Sudp,
+            server_name: "sudp-echo".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+
+        schedule_sudp_direct_probe_retries(
+            state.clone(),
+            visitor,
+            session_id.clone(),
+            vec![peer.local_addr().unwrap()],
+        );
+
+        let mut buf = vec![0_u8; 1024];
+        for _ in 0..2 {
+            let (n, _) = time::timeout(Duration::from_secs(1), peer.recv_from(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            let frame = parse_sudp_direct_frame(&buf[..n]).unwrap();
+            assert_eq!(frame.session_id, session_id);
+            assert!(frame.probe);
+            assert!(frame.from_visitor);
+        }
+
+        state
+            .sudp_direct_confirmed
+            .lock()
+            .await
+            .insert(session_id.clone());
+        let extra = time::timeout(Duration::from_millis(700), peer.recv_from(&mut buf)).await;
+        assert!(extra.is_err(), "probe retries continued after confirmation");
     }
 
     #[test]
