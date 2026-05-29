@@ -38,6 +38,7 @@ struct ClientState {
     sudp_direct_pending: Arc<Mutex<HashMap<String, VecDeque<DirectSudpFrame>>>>,
     sudp_direct_confirmed: Arc<Mutex<HashSet<String>>>,
     nat_hole_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<NatHoleResponse>>>>,
+    nat_hole_cached: Arc<Mutex<HashMap<String, NatHoleResponse>>>,
     writer: Arc<Mutex<WriteHalf<BoxStream>>>,
 }
 
@@ -47,7 +48,7 @@ struct SudpVisitorSession {
     peer: SocketAddr,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct NatHoleResponse {
     peer_observed_addr: String,
     peer_local_addrs: Vec<String>,
@@ -175,6 +176,7 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
         sudp_direct_pending: Arc::new(Mutex::new(HashMap::new())),
         sudp_direct_confirmed: Arc::new(Mutex::new(HashSet::new())),
         nat_hole_waiters: Arc::new(Mutex::new(HashMap::new())),
+        nat_hole_cached: Arc::new(Mutex::new(HashMap::new())),
         writer: Arc::new(Mutex::new(writer)),
     };
 
@@ -297,19 +299,18 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
                 error,
                 ..
             } => {
-                let key = nat_hole_waiter_key(&transaction_id, &role);
-                if let Some(waiter) = state.nat_hole_waiters.lock().await.remove(&key) {
-                    let _ = waiter.send(NatHoleResponse {
+                handle_nat_hole_response(
+                    &state,
+                    transaction_id,
+                    role,
+                    NatHoleResponse {
                         peer_observed_addr,
                         peer_local_addrs,
                         waiting,
                         error,
-                    });
-                } else {
-                    debug!(
-                        "ignored nat hole response for transaction {transaction_id} role {role}"
-                    );
-                }
+                    },
+                )
+                .await;
             }
             other => {
                 debug!("ignored server message: {other:?}");
@@ -404,6 +405,24 @@ fn nat_hole_waiter_key(transaction_id: &str, role: &str) -> String {
     format!("{transaction_id}|{role}")
 }
 
+async fn handle_nat_hole_response(
+    state: &ClientState,
+    transaction_id: String,
+    role: String,
+    resp: NatHoleResponse,
+) {
+    let key = nat_hole_waiter_key(&transaction_id, &role);
+    if let Some(waiter) = state.nat_hole_waiters.lock().await.remove(&key) {
+        let _ = waiter.send(resp);
+        return;
+    }
+    if resp.waiting || !resp.error.is_empty() {
+        debug!("ignored nat hole response for transaction {transaction_id} role {role}");
+        return;
+    }
+    state.nat_hole_cached.lock().await.insert(key, resp);
+}
+
 async fn request_nat_hole(
     state: &ClientState,
     transaction_id: &str,
@@ -411,8 +430,15 @@ async fn request_nat_hole(
     role: &str,
     local_addrs: Vec<String>,
 ) -> Result<NatHoleResponse> {
-    let (tx, rx) = oneshot::channel();
     let key = nat_hole_waiter_key(transaction_id, role);
+    if let Some(resp) = state.nat_hole_cached.lock().await.remove(&key) {
+        if !resp.error.is_empty() {
+            bail!("nat hole register failed: {}", resp.error);
+        }
+        return Ok(resp);
+    }
+
+    let (tx, rx) = oneshot::channel();
     state.nat_hole_waiters.lock().await.insert(key.clone(), tx);
     let send_result = state
         .send(&Message::NatHoleRegister {
@@ -1939,6 +1965,7 @@ mod tests {
             sudp_direct_pending: Arc::new(Mutex::new(HashMap::new())),
             sudp_direct_confirmed: Arc::new(Mutex::new(HashSet::new())),
             nat_hole_waiters: Arc::new(Mutex::new(HashMap::new())),
+            nat_hole_cached: Arc::new(Mutex::new(HashMap::new())),
             writer: Arc::new(Mutex::new(writer)),
         };
         (state, server)
@@ -1966,6 +1993,64 @@ mod tests {
             }
         });
         (addr, task)
+    }
+
+    #[tokio::test]
+    async fn nat_hole_response_without_waiter_is_cached() {
+        let (state, _server) = test_state();
+        handle_nat_hole_response(
+            &state,
+            "tx-cache".to_string(),
+            "server".to_string(),
+            NatHoleResponse {
+                peer_observed_addr: "127.0.0.1:7002".to_string(),
+                peer_local_addrs: vec!["10.0.0.20:10002".to_string()],
+                waiting: false,
+                error: String::new(),
+            },
+        )
+        .await;
+
+        let cached = state
+            .nat_hole_cached
+            .lock()
+            .await
+            .remove(&nat_hole_waiter_key("tx-cache", "server"))
+            .unwrap();
+        assert_eq!(cached.peer_observed_addr, "127.0.0.1:7002");
+        assert_eq!(cached.peer_local_addrs, vec!["10.0.0.20:10002"]);
+    }
+
+    #[tokio::test]
+    async fn request_nat_hole_consumes_cached_response() {
+        let (state, _server) = test_state();
+        state.nat_hole_cached.lock().await.insert(
+            nat_hole_waiter_key("tx-cache", "visitor"),
+            NatHoleResponse {
+                peer_observed_addr: "127.0.0.1:7001".to_string(),
+                peer_local_addrs: vec!["10.0.0.10:10001".to_string()],
+                waiting: false,
+                error: String::new(),
+            },
+        );
+
+        let resp = request_nat_hole(
+            &state,
+            "tx-cache",
+            "xtcp-ssh",
+            "visitor",
+            vec!["10.0.0.20:10002".to_string()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resp.peer_observed_addr, "127.0.0.1:7001");
+        assert_eq!(resp.peer_local_addrs, vec!["10.0.0.10:10001"]);
+        assert!(!state
+            .nat_hole_cached
+            .lock()
+            .await
+            .contains_key(&nat_hole_waiter_key("tx-cache", "visitor")));
     }
 
     #[test]
