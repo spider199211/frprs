@@ -3178,6 +3178,7 @@ async fn sudp_visitor_forwards_packets_directly_when_peer_reachable() {
         .unwrap()
         .unwrap();
     assert_eq!(&buf[..n], b"hello sudp");
+    sleep(Duration::from_millis(400)).await;
 
     let metrics = http_request(
         format!("127.0.0.1:{dashboard_port}"),
