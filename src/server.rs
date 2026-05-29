@@ -1,6 +1,6 @@
 use crate::{
     config::{ServerConfig, TransportProtocol},
-    nathole::{NatHoleController, NatHoleOutcome, NatHolePeer, NatHoleRole},
+    nathole::{NatHoleCandidate, NatHoleController, NatHoleOutcome, NatHolePeer, NatHoleRole},
     protocol::{read_msg, write_msg, Message, UdpPacketFrame},
     transports::{self, BoxStream},
 };
@@ -721,19 +721,34 @@ async fn handle_nat_hole_register(
     local_addrs: Vec<String>,
 ) -> Message {
     let parsed = parse_nat_hole_role(&role)
-        .and_then(|role| parse_socket_addrs(&local_addrs).map(|local_addrs| (role, local_addrs)))
-        .and_then(|(role, local_addrs)| {
-            state.nathole.register(NatHolePeer {
-                transaction_id: transaction_id.clone(),
-                proxy_name: proxy_name.clone(),
-                run_id: control.run_id.clone(),
+        .and_then(|role| parse_socket_addrs(&local_addrs).map(|local_addrs| (role, local_addrs)));
+    let (parsed_role, parsed_local_addrs) = match parsed {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            return Message::NatHoleResp {
+                transaction_id,
+                proxy_name,
                 role,
-                observed_addr: peer,
-                local_addrs,
-            })
-        });
+                observed_addr: peer.to_string(),
+                peer_observed_addr: String::new(),
+                peer_local_addrs: Vec::new(),
+                waiting: false,
+                error: err.to_string(),
+            };
+        }
+    };
 
-    match parsed {
+    let current_peer = NatHolePeer {
+        transaction_id: transaction_id.clone(),
+        proxy_name: proxy_name.clone(),
+        run_id: control.run_id.clone(),
+        role: parsed_role,
+        observed_addr: peer,
+        local_addrs: parsed_local_addrs,
+    };
+    let registered = state.nathole.register(current_peer.clone());
+
+    match registered {
         Ok(NatHoleOutcome::Waiting) => Message::NatHoleResp {
             transaction_id,
             proxy_name,
@@ -744,20 +759,23 @@ async fn handle_nat_hole_register(
             waiting: true,
             error: String::new(),
         },
-        Ok(NatHoleOutcome::Matched(candidate)) => Message::NatHoleResp {
-            transaction_id,
-            proxy_name,
-            role,
-            observed_addr: peer.to_string(),
-            peer_observed_addr: candidate.observed_addr.to_string(),
-            peer_local_addrs: candidate
-                .local_addrs
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-            waiting: false,
-            error: String::new(),
-        },
+        Ok(NatHoleOutcome::Matched(candidate)) => {
+            notify_nat_hole_peer(state, current_peer.clone(), &candidate).await;
+            Message::NatHoleResp {
+                transaction_id,
+                proxy_name,
+                role,
+                observed_addr: peer.to_string(),
+                peer_observed_addr: candidate.observed_addr.to_string(),
+                peer_local_addrs: candidate
+                    .local_addrs
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                waiting: false,
+                error: String::new(),
+            }
+        }
         Err(err) => Message::NatHoleResp {
             transaction_id,
             proxy_name,
@@ -768,6 +786,47 @@ async fn handle_nat_hole_register(
             waiting: false,
             error: err.to_string(),
         },
+    }
+}
+
+async fn notify_nat_hole_peer(
+    state: ServerState,
+    current_peer: NatHolePeer,
+    candidate: &NatHoleCandidate,
+) {
+    if candidate.peer_run_id == current_peer.run_id {
+        return;
+    }
+    let peer_control = {
+        let controls = state.controls.lock().await;
+        controls.get(&candidate.peer_run_id).cloned()
+    };
+    let Some(peer_control) = peer_control else {
+        debug!(
+            "nat hole peer control {} is no longer connected",
+            candidate.peer_run_id
+        );
+        return;
+    };
+    let msg = Message::NatHoleResp {
+        transaction_id: current_peer.transaction_id.clone(),
+        proxy_name: current_peer.proxy_name.clone(),
+        role: nat_hole_role_name(candidate.peer_role).to_string(),
+        observed_addr: candidate.observed_addr.to_string(),
+        peer_observed_addr: current_peer.observed_addr.to_string(),
+        peer_local_addrs: current_peer
+            .local_addrs
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        waiting: false,
+        error: String::new(),
+    };
+    if let Err(err) = peer_control.send(&msg).await {
+        debug!(
+            "notify nat hole peer {} for transaction {} failed: {err:#}",
+            candidate.peer_run_id, current_peer.transaction_id
+        );
     }
 }
 
@@ -3606,20 +3665,150 @@ fn normalize_locations(locations: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{AuthConfig, ServerPluginConfig, TransportConfig};
     use tokio::io::duplex;
 
     fn test_control(pool_count: usize) -> (Arc<Control>, tokio::io::DuplexStream) {
+        test_control_with_run_id("test-run", pool_count)
+    }
+
+    fn test_control_with_run_id(
+        run_id: &str,
+        pool_count: usize,
+    ) -> (Arc<Control>, tokio::io::DuplexStream) {
         let (client, server) = duplex(4096);
         let stream: BoxStream = Box::new(client);
         let (_reader, writer) = tokio::io::split(stream);
         let control = Arc::new(Control {
-            run_id: "test-run".to_string(),
+            run_id: run_id.to_string(),
             peer_addr: "127.0.0.1:1".parse().unwrap(),
             pool_count,
             writer: Mutex::new(writer),
             work_pool: WorkPool::new(),
         });
         (control, server)
+    }
+
+    fn test_server_state(controls: Vec<Arc<Control>>) -> ServerState {
+        ServerState {
+            cfg: Arc::new(ServerConfig {
+                bind_addr: "127.0.0.1".to_string(),
+                bind_port: 7000,
+                proxy_bind_addr: "127.0.0.1".to_string(),
+                vhost_http_port: 0,
+                vhost_https_port: 0,
+                dashboard_addr: "127.0.0.1".to_string(),
+                dashboard_port: 0,
+                allow_ports: Vec::new(),
+                auth: AuthConfig { token: None },
+                plugins: ServerPluginConfig::default(),
+                transport: TransportConfig::default(),
+            }),
+            controls: Arc::new(Mutex::new(
+                controls
+                    .into_iter()
+                    .map(|control| (control.run_id.clone(), control))
+                    .collect(),
+            )),
+            http_routes: Arc::new(Mutex::new(HashMap::new())),
+            http_route_next: Arc::new(Mutex::new(HashMap::new())),
+            tcpmux_routes: Arc::new(Mutex::new(HashMap::new())),
+            tcpmux_route_next: Arc::new(Mutex::new(HashMap::new())),
+            https_routes: Arc::new(Mutex::new(HashMap::new())),
+            https_route_next: Arc::new(Mutex::new(HashMap::new())),
+            stcp_routes: Arc::new(Mutex::new(HashMap::new())),
+            stcp_groups: Arc::new(Mutex::new(HashMap::new())),
+            xtcp_routes: Arc::new(Mutex::new(HashMap::new())),
+            xtcp_groups: Arc::new(Mutex::new(HashMap::new())),
+            sudp_routes: Arc::new(Mutex::new(HashMap::new())),
+            sudp_sessions: Arc::new(Mutex::new(HashMap::new())),
+            tcp_groups: Arc::new(Mutex::new(HashMap::new())),
+            udp_groups: Arc::new(Mutex::new(HashMap::new())),
+            nathole: Arc::new(NatHoleController::default()),
+            udp_relays: Arc::new(Mutex::new(HashMap::new())),
+            proxy_entries: Arc::new(Mutex::new(HashMap::new())),
+            allow_ports: Arc::new(Mutex::new(Vec::new())),
+            metrics: Arc::new(ServerMetrics {
+                started_unix_secs: 0,
+                visitor_connections_total: AtomicU64::new(0),
+                bytes_up_total: AtomicU64::new(0),
+                bytes_down_total: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn nat_hole_match_notifies_waiting_peer() {
+        let (owner_control, mut owner_stream) = test_control_with_run_id("owner-run", 0);
+        let (visitor_control, _visitor_stream) = test_control_with_run_id("visitor-run", 0);
+        let state = test_server_state(vec![owner_control.clone(), visitor_control.clone()]);
+
+        let owner_resp = handle_nat_hole_register(
+            state.clone(),
+            owner_control,
+            "127.0.0.1:7001".parse().unwrap(),
+            "tx-p2p".to_string(),
+            "xtcp-ssh".to_string(),
+            "server".to_string(),
+            vec!["10.0.0.10:10001".to_string()],
+        )
+        .await;
+        assert!(matches!(
+            owner_resp,
+            Message::NatHoleResp { waiting: true, .. }
+        ));
+
+        let visitor_resp = handle_nat_hole_register(
+            state,
+            visitor_control,
+            "127.0.0.1:7002".parse().unwrap(),
+            "tx-p2p".to_string(),
+            "xtcp-ssh".to_string(),
+            "visitor".to_string(),
+            vec!["10.0.0.20:10002".to_string()],
+        )
+        .await;
+        match visitor_resp {
+            Message::NatHoleResp {
+                role,
+                peer_observed_addr,
+                peer_local_addrs,
+                waiting,
+                error,
+                ..
+            } => {
+                assert_eq!(role, "visitor");
+                assert_eq!(peer_observed_addr, "127.0.0.1:7001");
+                assert_eq!(peer_local_addrs, vec!["10.0.0.10:10001"]);
+                assert!(!waiting);
+                assert!(error.is_empty());
+            }
+            other => panic!("unexpected visitor response: {other:?}"),
+        }
+
+        match time::timeout(Duration::from_secs(1), read_msg(&mut owner_stream))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Message::NatHoleResp {
+                role,
+                observed_addr,
+                peer_observed_addr,
+                peer_local_addrs,
+                waiting,
+                error,
+                ..
+            } => {
+                assert_eq!(role, "server");
+                assert_eq!(observed_addr, "127.0.0.1:7001");
+                assert_eq!(peer_observed_addr, "127.0.0.1:7002");
+                assert_eq!(peer_local_addrs, vec!["10.0.0.20:10002"]);
+                assert!(!waiting);
+                assert!(error.is_empty());
+            }
+            other => panic!("unexpected owner notification: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -3937,6 +4126,13 @@ fn parse_nat_hole_role(value: &str) -> Result<NatHoleRole> {
         "server" | "owner" => Ok(NatHoleRole::Server),
         "visitor" => Ok(NatHoleRole::Visitor),
         other => bail!("unknown nat hole role {other:?}"),
+    }
+}
+
+fn nat_hole_role_name(role: NatHoleRole) -> &'static str {
+    match role {
+        NatHoleRole::Server => "server",
+        NatHoleRole::Visitor => "visitor",
     }
 }
 
