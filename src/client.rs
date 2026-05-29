@@ -11,7 +11,7 @@ use serde_json::json;
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -19,7 +19,7 @@ use std::{
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt, WriteHalf},
     net::{TcpListener, TcpStream, UdpSocket},
-    sync::{oneshot, Mutex},
+    sync::{mpsc, oneshot, Mutex},
     time,
 };
 use tracing::{debug, error, info, warn};
@@ -62,6 +62,12 @@ struct DirectSudpFrame {
     sk: Option<String>,
     from_visitor: bool,
     ack: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DirectCandidateSource {
+    Local,
+    Observed,
 }
 
 impl ClientState {
@@ -665,70 +671,155 @@ async fn try_xtcp_direct_visitor(
         return Ok(false);
     }
 
-    let candidates = direct_candidates(&resp);
-    for candidate in candidates {
-        let Ok(addr) = candidate.parse::<SocketAddr>() else {
-            debug!("ignore invalid xtcp direct candidate {candidate}");
-            continue;
-        };
-        let connect = time::timeout(Duration::from_secs(2), TcpStream::connect(addr)).await;
-        let mut peer = match connect {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(err)) => {
-                debug!("xtcp direct connect {candidate} failed: {err:#}");
-                continue;
-            }
-            Err(_) => {
-                debug!("xtcp direct connect {candidate} timed out");
-                continue;
-            }
-        };
-        configure_tcp_stream(&peer);
-        write_msg(
-            &mut peer,
-            &Message::NewVisitorConn {
-                proxy_name: visitor.server_name.clone(),
-                sk: visitor.sk.clone(),
-                token: None,
-            },
-        )
-        .await?;
-        match read_msg(&mut peer).await? {
-            Message::NewVisitorConnResp { error, .. } if error.is_empty() => {
-                info!(
-                    "xtcp visitor {} connected directly to {}",
-                    visitor.name, candidate
-                );
-                io::copy_bidirectional(inbound, &mut peer)
-                    .await
-                    .with_context(|| {
-                        format!("copy xtcp direct visitor bytes for {}", visitor.name)
-                    })?;
-                return Ok(true);
-            }
-            Message::NewVisitorConnResp { error, .. } => {
-                debug!("xtcp direct peer {candidate} rejected visitor: {error}");
-            }
-            other => {
-                debug!("unexpected xtcp direct response from {candidate}: {other:?}");
-            }
-        }
+    if let Some((mut peer, candidate)) =
+        connect_xtcp_direct_peer(visitor, direct_candidates(&resp)).await?
+    {
+        info!(
+            "xtcp visitor {} connected directly to {}",
+            visitor.name, candidate
+        );
+        io::copy_bidirectional(inbound, &mut peer)
+            .await
+            .with_context(|| format!("copy xtcp direct visitor bytes for {}", visitor.name))?;
+        return Ok(true);
     }
 
     Ok(false)
 }
 
-fn direct_candidates(resp: &NatHoleResponse) -> Vec<String> {
-    let mut out = Vec::new();
-    for addr in &resp.peer_local_addrs {
-        if !out.contains(addr) {
-            out.push(addr.clone());
+async fn connect_xtcp_direct_peer(
+    visitor: &VisitorConfig,
+    candidates: Vec<String>,
+) -> Result<Option<(TcpStream, String)>> {
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let (tx, mut rx) = mpsc::channel(candidates.len());
+    for candidate in candidates {
+        let tx = tx.clone();
+        let visitor = visitor.clone();
+        tokio::spawn(async move {
+            let result = time::timeout(
+                Duration::from_secs(2),
+                connect_xtcp_direct_candidate(&visitor, &candidate),
+            )
+            .await
+            .unwrap_or_else(|_| Err(anyhow!("xtcp direct candidate timed out")));
+            let _ = tx.send((candidate, result)).await;
+        });
+    }
+    drop(tx);
+
+    while let Some((candidate, result)) = rx.recv().await {
+        match result {
+            Ok(peer) => return Ok(Some((peer, candidate))),
+            Err(err) => debug!("xtcp direct candidate {candidate} failed: {err:#}"),
         }
     }
-    if !resp.peer_observed_addr.is_empty() && !out.contains(&resp.peer_observed_addr) {
-        out.push(resp.peer_observed_addr.clone());
+    Ok(None)
+}
+
+async fn connect_xtcp_direct_candidate(
+    visitor: &VisitorConfig,
+    candidate: &str,
+) -> Result<TcpStream> {
+    let addr = candidate
+        .parse::<SocketAddr>()
+        .with_context(|| format!("parse xtcp direct candidate {candidate}"))?;
+    let mut peer = TcpStream::connect(addr)
+        .await
+        .with_context(|| format!("connect xtcp direct candidate {candidate}"))?;
+    configure_tcp_stream(&peer);
+    write_msg(
+        &mut peer,
+        &Message::NewVisitorConn {
+            proxy_name: visitor.server_name.clone(),
+            sk: visitor.sk.clone(),
+            token: None,
+        },
+    )
+    .await
+    .with_context(|| format!("write xtcp direct handshake to {candidate}"))?;
+
+    match read_msg(&mut peer)
+        .await
+        .with_context(|| format!("read xtcp direct handshake from {candidate}"))?
+    {
+        Message::NewVisitorConnResp { error, .. } if error.is_empty() => Ok(peer),
+        Message::NewVisitorConnResp { error, .. } => {
+            bail!("xtcp direct peer rejected visitor: {error}")
+        }
+        other => bail!("unexpected xtcp direct response: {other:?}"),
     }
-    out
+}
+
+fn direct_candidates(resp: &NatHoleResponse) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+    for (source, candidate) in resp
+        .peer_local_addrs
+        .iter()
+        .map(|addr| (DirectCandidateSource::Local, addr))
+        .chain(std::iter::once((
+            DirectCandidateSource::Observed,
+            &resp.peer_observed_addr,
+        )))
+    {
+        if candidate.is_empty() {
+            continue;
+        }
+        let Ok(addr) = candidate.parse::<SocketAddr>() else {
+            debug!("ignore invalid direct candidate {candidate}");
+            continue;
+        };
+        if seen.insert(addr) {
+            candidates.push((direct_candidate_rank(source, &addr), candidate.clone()));
+        }
+    }
+    candidates.sort_by_key(|(rank, _)| *rank);
+    candidates
+        .into_iter()
+        .map(|(_, candidate)| candidate)
+        .collect()
+}
+
+fn direct_candidate_rank(source: DirectCandidateSource, addr: &SocketAddr) -> (u8, u8) {
+    (source as u8, direct_candidate_addr_rank(addr.ip()))
+}
+
+fn direct_candidate_addr_rank(ip: IpAddr) -> u8 {
+    match ip {
+        IpAddr::V4(ip) if is_public_ipv4(ip) => 0,
+        IpAddr::V6(ip) if is_public_ipv6(ip) => 0,
+        IpAddr::V4(ip) if ip.is_private() => 1,
+        IpAddr::V6(ip) if ip.is_unique_local() => 1,
+        IpAddr::V4(ip) if ip.is_link_local() => 2,
+        IpAddr::V6(ip) if ip.is_unicast_link_local() => 2,
+        IpAddr::V4(ip) if ip.is_loopback() => 3,
+        IpAddr::V6(ip) if ip.is_loopback() => 3,
+        IpAddr::V4(ip) if ip.is_unspecified() || ip.is_multicast() => 5,
+        IpAddr::V6(ip) if ip.is_unspecified() || ip.is_multicast() => 5,
+        _ => 4,
+    }
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    !(ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_unspecified()
+        || ip.is_multicast())
+}
+
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    !(ip.is_loopback()
+        || ip.is_unique_local()
+        || ip.is_unicast_link_local()
+        || ip.is_unspecified()
+        || ip.is_multicast())
 }
 
 async fn run_sudp_visitor_listener(state: ClientState, visitor: VisitorConfig) -> Result<()> {
@@ -1708,6 +1799,102 @@ mod tests {
             writer: Arc::new(Mutex::new(writer)),
         };
         (state, server)
+    }
+
+    async fn spawn_xtcp_direct_test_peer(delay: Duration) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            match read_msg(&mut stream).await.unwrap() {
+                Message::NewVisitorConn { proxy_name, .. } => {
+                    time::sleep(delay).await;
+                    write_msg(
+                        &mut stream,
+                        &Message::NewVisitorConnResp {
+                            proxy_name,
+                            error: String::new(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+                other => panic!("unexpected direct handshake: {other:?}"),
+            }
+        });
+        (addr, task)
+    }
+
+    #[test]
+    fn direct_candidates_dedupes_and_filters_invalid_addrs() {
+        let resp = NatHoleResponse {
+            peer_observed_addr: "127.0.0.1:9000".to_string(),
+            peer_local_addrs: vec![
+                "127.0.0.1:7000".to_string(),
+                "not-a-socket".to_string(),
+                "127.0.0.1:7000".to_string(),
+            ],
+            waiting: false,
+            error: String::new(),
+        };
+
+        assert_eq!(
+            direct_candidates(&resp),
+            vec!["127.0.0.1:7000".to_string(), "127.0.0.1:9000".to_string()]
+        );
+    }
+
+    #[test]
+    fn direct_candidates_prefer_reachable_local_addr_classes() {
+        let resp = NatHoleResponse {
+            peer_observed_addr: "8.8.4.4:9000".to_string(),
+            peer_local_addrs: vec![
+                "127.0.0.1:7000".to_string(),
+                "10.0.0.2:7000".to_string(),
+                "8.8.8.8:7000".to_string(),
+            ],
+            waiting: false,
+            error: String::new(),
+        };
+
+        assert_eq!(
+            direct_candidates(&resp),
+            vec![
+                "8.8.8.8:7000".to_string(),
+                "10.0.0.2:7000".to_string(),
+                "127.0.0.1:7000".to_string(),
+                "8.8.4.4:9000".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn xtcp_direct_candidates_race_to_first_successful_handshake() {
+        let (slow_addr, slow_task) = spawn_xtcp_direct_test_peer(Duration::from_millis(800)).await;
+        let (fast_addr, fast_task) = spawn_xtcp_direct_test_peer(Duration::from_millis(10)).await;
+        let visitor = VisitorConfig {
+            name: "visitor".to_string(),
+            visitor_type: ProxyType::Xtcp,
+            server_name: "xtcp-echo".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+
+        let start = std::time::Instant::now();
+        let (_peer, candidate) =
+            connect_xtcp_direct_peer(&visitor, vec![slow_addr.clone(), fast_addr.clone()])
+                .await
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(candidate, fast_addr);
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "candidate racing waited for slow candidate"
+        );
+        slow_task.abort();
+        fast_task.abort();
     }
 
     #[tokio::test]
