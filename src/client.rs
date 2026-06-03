@@ -26,6 +26,7 @@ use tracing::{debug, error, info, warn};
 
 const DIRECT_SUDP_MAGIC: &str = "frprs-sudp-direct-v1";
 const NAT_HOLE_CACHED_RESPONSE_TTL: Duration = Duration::from_secs(30);
+const NAT_HOLE_OWNER_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct ClientState {
@@ -64,6 +65,14 @@ struct NatHoleResponse {
 struct NatHoleCachedResponse {
     resp: NatHoleResponse,
     cached_at: Instant,
+}
+
+#[derive(Clone)]
+struct NatHoleAnnouncement {
+    transaction_id: String,
+    proxy_name: String,
+    role: &'static str,
+    local_addrs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -678,6 +687,68 @@ async fn announce_nat_hole(
         .await
 }
 
+async fn announce_nat_hole_entry(
+    state: &ClientState,
+    announcement: &NatHoleAnnouncement,
+) -> Result<()> {
+    announce_nat_hole(
+        state,
+        &announcement.transaction_id,
+        &announcement.proxy_name,
+        announcement.role,
+        announcement.local_addrs.clone(),
+    )
+    .await
+}
+
+async fn announce_nat_hole_entries(
+    state: &ClientState,
+    announcements: &[NatHoleAnnouncement],
+) -> Result<()> {
+    for announcement in announcements {
+        announce_nat_hole_entry(state, announcement).await?;
+    }
+    Ok(())
+}
+
+fn owner_nat_hole_announcements(
+    proxy: &ProxyConfig,
+    advertised_addr: String,
+) -> Vec<NatHoleAnnouncement> {
+    let mut announcements = vec![NatHoleAnnouncement {
+        transaction_id: proxy.name.clone(),
+        proxy_name: proxy.name.clone(),
+        role: "server",
+        local_addrs: vec![advertised_addr.clone()],
+    }];
+    if let Some(group_name) = proxy.group.as_deref().filter(|group| !group.is_empty()) {
+        announcements.push(NatHoleAnnouncement {
+            transaction_id: group_name.to_string(),
+            proxy_name: group_name.to_string(),
+            role: "server",
+            local_addrs: vec![advertised_addr],
+        });
+    }
+    announcements
+}
+
+fn spawn_nat_hole_owner_refresh(
+    state: ClientState,
+    proxy_name: String,
+    announcements: Vec<NatHoleAnnouncement>,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            time::sleep(interval).await;
+            if let Err(err) = announce_nat_hole_entries(&state, &announcements).await {
+                debug!("stop nat hole refresh for {proxy_name}: {err:#}");
+                break;
+            }
+        }
+    })
+}
+
 async fn run_visitor_listener(state: ClientState, visitor: VisitorConfig) -> Result<()> {
     match visitor.visitor_type {
         ProxyType::Stcp | ProxyType::Xtcp => {}
@@ -771,24 +842,14 @@ async fn start_xtcp_direct_owner_listener(state: ClientState, proxy: ProxyConfig
         .context("read xtcp direct owner addr")?;
     let advertised_addr = local_addr.to_string();
 
-    announce_nat_hole(
-        &state,
-        &proxy.name,
-        &proxy.name,
-        "server",
-        vec![advertised_addr.clone()],
-    )
-    .await?;
-    if let Some(group) = proxy.group.as_deref() {
-        announce_nat_hole(
-            &state,
-            group,
-            group,
-            "server",
-            vec![advertised_addr.clone()],
-        )
-        .await?;
-    }
+    let announcements = owner_nat_hole_announcements(&proxy, advertised_addr.clone());
+    announce_nat_hole_entries(&state, &announcements).await?;
+    let _refresh = spawn_nat_hole_owner_refresh(
+        state.clone(),
+        proxy.name.clone(),
+        announcements,
+        NAT_HOLE_OWNER_REFRESH_INTERVAL,
+    );
 
     info!(
         "xtcp direct owner {} listening on {}",
@@ -1124,24 +1185,14 @@ async fn start_sudp_direct_owner_listener(state: ClientState, proxy: ProxyConfig
         .lock()
         .await
         .insert(proxy.name.clone(), socket.clone());
-    announce_nat_hole(
-        &state,
-        &proxy.name,
-        &proxy.name,
-        "server",
-        vec![advertised_addr.clone()],
-    )
-    .await?;
-    if let Some(group_name) = proxy.group.as_deref().filter(|group| !group.is_empty()) {
-        announce_nat_hole(
-            &state,
-            group_name,
-            group_name,
-            "server",
-            vec![advertised_addr.clone()],
-        )
-        .await?;
-    }
+    let announcements = owner_nat_hole_announcements(&proxy, advertised_addr.clone());
+    announce_nat_hole_entries(&state, &announcements).await?;
+    let _refresh = spawn_nat_hole_owner_refresh(
+        state.clone(),
+        proxy.name.clone(),
+        announcements,
+        NAT_HOLE_OWNER_REFRESH_INTERVAL,
+    );
     info!(
         "sudp direct owner {} listening on {}",
         proxy.name, advertised_addr
@@ -2507,6 +2558,55 @@ mod tests {
         assert!(!resp.waiting);
         assert_eq!(resp.peer_observed_addr, "127.0.0.1:7001");
         assert_eq!(resp.peer_local_addrs, vec!["10.0.0.10:10001"]);
+    }
+
+    #[tokio::test]
+    async fn nat_hole_owner_refresh_reannounces_proxy_and_group() {
+        let (state, mut server) = test_state();
+        let announcements = vec![
+            NatHoleAnnouncement {
+                transaction_id: "xtcp-echo".to_string(),
+                proxy_name: "xtcp-echo".to_string(),
+                role: "server",
+                local_addrs: vec!["127.0.0.1:10001".to_string()],
+            },
+            NatHoleAnnouncement {
+                transaction_id: "xtcp-group".to_string(),
+                proxy_name: "xtcp-group".to_string(),
+                role: "server",
+                local_addrs: vec!["127.0.0.1:10001".to_string()],
+            },
+        ];
+
+        let refresh = spawn_nat_hole_owner_refresh(
+            state,
+            "xtcp-echo".to_string(),
+            announcements,
+            Duration::from_millis(10),
+        );
+
+        for expected in ["xtcp-echo", "xtcp-group"] {
+            match time::timeout(Duration::from_secs(1), read_msg(&mut server))
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                Message::NatHoleRegister {
+                    transaction_id,
+                    proxy_name,
+                    role,
+                    local_addrs,
+                } => {
+                    assert_eq!(transaction_id, expected);
+                    assert_eq!(proxy_name, expected);
+                    assert_eq!(role, "server");
+                    assert_eq!(local_addrs, vec!["127.0.0.1:10001"]);
+                }
+                other => panic!("unexpected nat hole refresh: {other:?}"),
+            }
+        }
+
+        refresh.abort();
     }
 
     #[tokio::test]
