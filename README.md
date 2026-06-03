@@ -268,7 +268,7 @@ cargo run --bin frpc -- -c conf/frpc.toml
 - 连接池：已通过 `poolCount` 实现预创建 work connection，合并高并发补池请求，并按等待者即时需求精确请求连接。
 - 带宽限制：已实现按代理限速。
 - Dashboard：已实现内置状态页面、客户端/代理/分组/指标 JSON API 和关闭代理/分组/客户端代理 Admin API。
-- 插件：已实现服务端登录、新代理、TCP/HTTP/HTTPS/TCPMUX 新用户连接、关闭代理 plain HTTP 钩子，并补充 frp 风格 `op` 字段。
+- 插件：已实现服务端登录、新代理、TCP/UDP/SUDP/HTTP/HTTPS/TCPMUX 新用户连接、关闭代理 plain HTTP 钩子，并补充 frp 风格 `op` 字段。
 - 热加载：`frpc` 会监听配置文件修改时间并自动重连。
 - TLS/WebSocket/QUIC/KCP：已实现真实控制/工作连接传输，并有端到端代理测试覆盖。
 - STCP/XTCP：已实现 TCP 流的私有 visitor 转发和分组负载均衡；XTCP 已支持可达 peer 的直连数据面，并保留服务端中继 fallback。
@@ -276,7 +276,7 @@ cargo run --bin frpc -- -c conf/frpc.toml
 - Transport/热路径：已补 TLS、WebSocket、基础 TCP mux、work connection 补池合并、等待者按需请求和 UDP 批处理缓存；后续继续补更完整的 mux 连接复用能力。
 - 运行时控制：已补轻量 Admin API、更多状态 API、指标接口、指标重置、按代理/分组/客户端关闭能力和 `allowPorts` 运行时更新；后续补更完整的运行时配置管理。
 - 策略能力：已补端口白名单和 TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/XTCP/SUDP 分组负载均衡；后续补更多协议的分组能力。
-- 插件能力：已补服务端 TCP/HTTP/HTTPS/TCPMUX 新用户连接钩子、客户端 TCP/UDP/SUDP 本地连接或会话前 HTTP 钩子和 `op` 兼容字段；后续补更多协议兼容。
+- 插件能力：已补服务端 TCP/UDP/SUDP/HTTP/HTTPS/TCPMUX 新用户连接钩子、客户端 TCP/UDP/SUDP 本地连接或会话前 HTTP 钩子和 `op` 兼容字段；后续补更多协议兼容。
 - VirtualNet 和 SSH tunnel gateway：作为独立里程碑实现。
 
 ## English
@@ -309,7 +309,7 @@ The current milestone implements the core reverse TCP proxy path:
 - lightweight frps dashboard at `/`, `/api/status`, `/api/clients`, `/api/proxies`, `/api/groups`, and `/api/metrics`
 - dashboard Admin API for resetting metrics counters at runtime
 - dashboard Admin API for closing a proxy, proxy group, or all proxies for a client, plus runtime allowPorts updates with an authenticated request
-- basic server-side HTTP plugin hooks for login, new proxy, TCP/HTTP/HTTPS/TCPMUX new user connection, and close proxy events, with `op` in payloads
+- basic server-side HTTP plugin hooks for login, new proxy, TCP/UDP/SUDP/HTTP/HTTPS/TCPMUX new user connection, and close proxy events, with `op` in payloads
 - client-side `localConnectURL` HTTP plugin hook before TCP/UDP/SUDP local connects or sessions, with `op` in payloads
 - STCP/XTCP private visitor protocols with `sk` authentication and local visitor listeners; XTCP connects directly when the peer is reachable and falls back to server relay otherwise
 - STCP/XTCP `group`/`groupKey` load balancing, allowing visitors to target a private service group
@@ -495,7 +495,7 @@ Parity roadmap:
 - Connection pool: pre-opened TCP work connections implemented through `poolCount`, with coalesced replenish requests and demand-aware waiter requests.
 - Bandwidth limit: per-proxy byte throttling implemented for stream proxies.
 - Dashboard: built-in status page, client/proxy/group/metrics JSON APIs, and close-proxy/group/client Admin APIs implemented.
-- Plugins: basic plain-HTTP login, new-proxy, TCP/HTTP/HTTPS/TCPMUX new-user-connection, and close-proxy hooks implemented, with frp-style `op` fields.
+- Plugins: basic plain-HTTP login, new-proxy, TCP/UDP/SUDP/HTTP/HTTPS/TCPMUX new-user-connection, and close-proxy hooks implemented, with frp-style `op` fields.
 - Hot reload: frpc watches config file mtime and reconnects on change.
 - TLS/WebSocket/QUIC/KCP: real control/work transports implemented and covered by end-to-end proxy tests.
 - STCP/XTCP: private visitor flow and group load balancing implemented for TCP streams; XTCP now has a direct data path for reachable peers plus server-relay fallback.
@@ -503,5 +503,5 @@ Parity roadmap:
 - Transport/hot paths: TLS, WebSocket, basic TCP mux, work-connection replenish coalescing, waiter demand-aware requests, and UDP batch-path caching implemented; add fuller mux connection reuse and more connection-pool tuning.
 - Runtime controls: lightweight Admin API, richer status APIs, metrics endpoint/reset, proxy/group/client close operations, and runtime `allowPorts` updates implemented; full runtime config management remains.
 - Policy: allow ports and TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/XTCP/SUDP group load balancing implemented; broader protocol group support remains.
-- Plugins: server-side TCP/HTTP/HTTPS/TCPMUX new-user-connection hook and client-side local-connect HTTP hook implemented for TCP/UDP/SUDP with `op` compatibility fields; more protocol compatibility remains.
+- Plugins: server-side TCP/UDP/SUDP/HTTP/HTTPS/TCPMUX new-user-connection hook and client-side local-connect HTTP hook implemented for TCP/UDP/SUDP with `op` compatibility fields; more protocol compatibility remains.
 - VirtualNet and SSH tunnel gateway: separate milestones.

@@ -13,7 +13,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf},
@@ -46,6 +46,7 @@ struct ServerState {
     udp_groups: Arc<Mutex<HashMap<String, UdpGroup>>>,
     nathole: Arc<NatHoleController>,
     udp_relays: Arc<Mutex<HashMap<String, Arc<UdpSocket>>>>,
+    datagram_user_sessions: Arc<Mutex<HashMap<(String, String), Instant>>>,
     proxy_entries: Arc<Mutex<HashMap<String, ProxyEntry>>>,
     allow_ports: Arc<Mutex<Vec<String>>>,
     metrics: Arc<ServerMetrics>,
@@ -177,6 +178,8 @@ struct ServerMetrics {
     bytes_down_total: AtomicU64,
 }
 
+const DATAGRAM_USER_SESSION_TTL: Duration = Duration::from_secs(60);
+
 impl Control {
     async fn send(&self, msg: &Message) -> Result<()> {
         let mut writer = self.writer.lock().await;
@@ -274,6 +277,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         udp_groups: Arc::new(Mutex::new(HashMap::new())),
         nathole: Arc::new(NatHoleController::default()),
         udp_relays: Arc::new(Mutex::new(HashMap::new())),
+        datagram_user_sessions: Arc::new(Mutex::new(HashMap::new())),
         proxy_entries: Arc::new(Mutex::new(HashMap::new())),
         allow_ports: Arc::new(Mutex::new(allow_ports)),
         metrics: Arc::new(ServerMetrics {
@@ -1345,6 +1349,9 @@ async fn start_udp_proxy(
     let (packet_tx, mut packet_rx) = mpsc::channel::<UdpPacketFrame>(128);
     let batch_control = control.clone();
     let batch_proxy_name = proxy_name.clone();
+    let task_state = state.clone();
+    let task_control = control.clone();
+    let task_remote_addr = remote_addr.clone();
     tokio::spawn(async move {
         while let Some(first) = packet_rx.recv().await {
             let mut packets = vec![first];
@@ -1378,6 +1385,20 @@ async fn start_udp_proxy(
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((n, visitor_addr)) => {
+                    let visitor_addr = visitor_addr.to_string();
+                    if let Err(err) = call_datagram_new_user_conn_hook(
+                        &task_state,
+                        &task_control,
+                        "udp",
+                        &task_proxy_name,
+                        &visitor_addr,
+                        &task_remote_addr,
+                    )
+                    .await
+                    {
+                        warn!("udp proxy {task_proxy_name} new user hook rejected {visitor_addr}: {err:#}");
+                        continue;
+                    }
                     metrics
                         .visitor_connections_total
                         .fetch_add(1, Ordering::Relaxed);
@@ -1387,7 +1408,7 @@ async fn start_udp_proxy(
                     let packet = UdpPacketFrame {
                         proxy_name: task_proxy_name.clone(),
                         content: buf[..n].to_vec(),
-                        visitor_addr: visitor_addr.to_string(),
+                        visitor_addr,
                     };
                     if let Err(err) = packet_tx.send(packet).await {
                         warn!("udp proxy {task_proxy_name} failed to queue packet batch: {err:#}");
@@ -1481,6 +1502,7 @@ async fn start_udp_group_proxy(
             let task_key = map_key.clone();
             let task_group = group.clone();
             let task_socket = socket.clone();
+            let task_remote_addr = remote_addr.clone();
             let metrics = state.metrics.clone();
             let task = tokio::spawn(async move {
                 let mut buf = vec![0_u8; 64 * 1024];
@@ -1504,10 +1526,27 @@ async fn start_udp_group_proxy(
                                     continue;
                                 }
                             };
+                            let visitor_addr = visitor_addr.to_string();
+                            if let Err(err) = call_datagram_new_user_conn_hook(
+                                &task_state,
+                                &route.control,
+                                "udp",
+                                &route.proxy_name,
+                                &visitor_addr,
+                                &task_remote_addr,
+                            )
+                            .await
+                            {
+                                warn!(
+                                    "udp group route {} new user hook rejected {visitor_addr}: {err:#}",
+                                    route.proxy_name
+                                );
+                                continue;
+                            }
                             let msg = Message::UdpPacket {
                                 proxy_name: route.proxy_name.clone(),
                                 content: buf[..n].to_vec(),
-                                visitor_addr: visitor_addr.to_string(),
+                                visitor_addr,
                             };
                             if let Err(err) = route.control.send(&msg).await {
                                 warn!(
@@ -1571,6 +1610,55 @@ async fn next_udp_group_route(state: ServerState, map_key: &str) -> Option<UdpGr
     let index = group.next % group.routes.len();
     group.next = group.next.wrapping_add(1);
     group.routes.get(index).cloned()
+}
+
+async fn call_datagram_new_user_conn_hook(
+    state: &ServerState,
+    control: &Arc<Control>,
+    proxy_type: &str,
+    proxy_name: &str,
+    user_addr: &str,
+    remote_addr: &str,
+) -> Result<()> {
+    if state.cfg.plugins.new_user_conn_url.is_none() {
+        return Ok(());
+    }
+
+    let now = Instant::now();
+    let proxy_key = format!("{proxy_type}:{proxy_name}");
+    let session_key = (proxy_key, user_addr.to_string());
+    let should_call = {
+        let mut sessions = state.datagram_user_sessions.lock().await;
+        sessions
+            .retain(|_, updated_at| now.duration_since(*updated_at) <= DATAGRAM_USER_SESSION_TTL);
+        let should_call = !sessions.contains_key(&session_key);
+        sessions.insert(session_key.clone(), now);
+        should_call
+    };
+    if !should_call {
+        return Ok(());
+    }
+
+    let result = call_plugin_hook(
+        state.cfg.plugins.new_user_conn_url.as_deref(),
+        json!({
+            "op": "NewUserConn",
+            "proxy_name": proxy_name,
+            "proxy_type": proxy_type,
+            "run_id": control.run_id.clone(),
+            "user_addr": user_addr,
+            "remote_addr": remote_addr,
+        }),
+    )
+    .await;
+    if result.is_err() {
+        state
+            .datagram_user_sessions
+            .lock()
+            .await
+            .remove(&session_key);
+    }
+    result
 }
 
 async fn send_udp_packet_to_visitor(
@@ -1678,15 +1766,26 @@ async fn handle_sudp_packet(
         if route.sk != sk {
             bail!("sudp secret key mismatch for proxy {proxy_name}");
         }
+        let route_proxy_name = route.proxy_name.clone();
+        let remote_addr = format!("sudp://{proxy_name}");
+        call_datagram_new_user_conn_hook(
+            &state,
+            &route.control,
+            "sudp",
+            &route_proxy_name,
+            &session_id,
+            &remote_addr,
+        )
+        .await?;
         state
             .sudp_sessions
             .lock()
             .await
-            .insert((proxy_name.clone(), session_id.clone()), control);
+            .insert((route_proxy_name.clone(), session_id.clone()), control);
         route
             .control
             .send(&Message::SudpPacket {
-                proxy_name: route.proxy_name,
+                proxy_name: route_proxy_name,
                 session_id,
                 content,
                 sk: None,
@@ -3122,6 +3221,15 @@ async fn close_proxy(state: ServerState, proxy_name: &str) -> Result<bool> {
     if let Some(task) = entry.task {
         task.abort();
     }
+    {
+        let udp_key = format!("udp:{proxy_name}");
+        let sudp_key = format!("sudp:{proxy_name}");
+        state
+            .datagram_user_sessions
+            .lock()
+            .await
+            .retain(|(proxy_key, _), _| proxy_key != &udp_key && proxy_key != &sudp_key);
+    }
 
     match entry.proxy_type.as_str() {
         "tcp" => {
@@ -3828,6 +3936,7 @@ mod tests {
             udp_groups: Arc::new(Mutex::new(HashMap::new())),
             nathole: Arc::new(NatHoleController::default()),
             udp_relays: Arc::new(Mutex::new(HashMap::new())),
+            datagram_user_sessions: Arc::new(Mutex::new(HashMap::new())),
             proxy_entries: Arc::new(Mutex::new(HashMap::new())),
             allow_ports: Arc::new(Mutex::new(Vec::new())),
             metrics: Arc::new(ServerMetrics {
@@ -3917,7 +4026,7 @@ mod tests {
     async fn sudp_group_routes_visitor_packets_round_robin() {
         let (owner_a, mut owner_a_stream) = test_control_with_run_id("owner-a", 0);
         let (owner_b, mut owner_b_stream) = test_control_with_run_id("owner-b", 0);
-        let (visitor_control, _visitor_stream) = test_control_with_run_id("visitor-run", 0);
+        let (visitor_control, mut visitor_stream) = test_control_with_run_id("visitor-run", 0);
         let state = test_server_state(vec![
             owner_a.clone(),
             owner_b.clone(),
@@ -3926,7 +4035,7 @@ mod tests {
 
         let remote_a = start_sudp_proxy(
             state.clone(),
-            owner_a,
+            owner_a.clone(),
             "sudp-a".to_string(),
             Some("sudp-group".to_string()),
             Some("group-secret".to_string()),
@@ -3937,7 +4046,7 @@ mod tests {
         .unwrap();
         let remote_b = start_sudp_proxy(
             state.clone(),
-            owner_b,
+            owner_b.clone(),
             "sudp-b".to_string(),
             Some("sudp-group".to_string()),
             Some("group-secret".to_string()),
@@ -4015,6 +4124,37 @@ mod tests {
                 assert!(from_visitor);
             }
             other => panic!("unexpected owner-b message: {other:?}"),
+        }
+
+        handle_sudp_packet(
+            state.clone(),
+            owner_a,
+            "sudp-a".to_string(),
+            "session-1".to_string(),
+            b"pong".to_vec(),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        match time::timeout(Duration::from_secs(1), read_msg(&mut visitor_stream))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Message::SudpPacket {
+                proxy_name,
+                session_id,
+                content,
+                from_visitor,
+                ..
+            } => {
+                assert_eq!(proxy_name, "sudp-a");
+                assert_eq!(session_id, "session-1");
+                assert_eq!(content, b"pong");
+                assert!(!from_visitor);
+            }
+            other => panic!("unexpected visitor message: {other:?}"),
         }
 
         let groups = tcp_group_list_json(&state).await.unwrap().to_string();
