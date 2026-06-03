@@ -42,6 +42,7 @@ struct ClientState {
     nat_hole_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<NatHoleResponse>>>>,
     nat_hole_cached: Arc<Mutex<HashMap<String, NatHoleResponse>>>,
     writer: Arc<Mutex<WriteHalf<BoxStream>>>,
+    quic_session: Option<Arc<transports::quic::QuicClientSession>>,
 }
 
 #[derive(Clone)]
@@ -134,7 +135,7 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
     }
 
     let server_addr = cfg.server_addr();
-    let mut stream = connect_control(&cfg)
+    let (mut stream, quic_session) = connect_session_control(&cfg)
         .await
         .with_context(|| format!("connect frps at {server_addr}"))?;
     info!("connected to frps at {server_addr}");
@@ -182,6 +183,7 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
         nat_hole_waiters: Arc::new(Mutex::new(HashMap::new())),
         nat_hole_cached: Arc::new(Mutex::new(HashMap::new())),
         writer: Arc::new(Mutex::new(writer)),
+        quic_session,
     };
 
     for proxy in state.proxies.values().cloned() {
@@ -387,6 +389,28 @@ async fn connect_control(cfg: &ClientConfig) -> Result<BoxStream> {
             Ok(Box::new(stream))
         }
     }
+}
+
+async fn connect_session_control(
+    cfg: &ClientConfig,
+) -> Result<(BoxStream, Option<Arc<transports::quic::QuicClientSession>>)> {
+    if cfg.transport.protocol == TransportProtocol::Quic {
+        let server_addr = resolve_server_addr(cfg).await?;
+        let session =
+            Arc::new(transports::quic::QuicClientSession::connect_insecure(server_addr).await?);
+        let stream = session.open_stream().await?;
+        return Ok((Box::new(stream), Some(session)));
+    }
+
+    Ok((connect_control(cfg).await?, None))
+}
+
+async fn open_control_stream(state: &ClientState) -> Result<BoxStream> {
+    if let Some(session) = &state.quic_session {
+        return Ok(Box::new(session.open_stream().await?));
+    }
+
+    connect_control(&state.cfg).await
 }
 
 async fn resolve_server_addr(cfg: &ClientConfig) -> Result<std::net::SocketAddr> {
@@ -691,7 +715,7 @@ async fn handle_stcp_visitor(
     }
 
     let server_addr = state.cfg.server_addr();
-    let mut stream = connect_control(&state.cfg)
+    let mut stream = open_control_stream(&state)
         .await
         .with_context(|| format!("connect frps visitor control at {server_addr}"))?;
     write_msg(
@@ -1829,7 +1853,7 @@ fn unix_now() -> u64 {
 
 async fn open_work_conn(state: ClientState) -> Result<()> {
     let server_addr = state.cfg.server_addr();
-    let mut stream = connect_control(&state.cfg)
+    let mut stream = open_control_stream(&state)
         .await
         .with_context(|| format!("open work connection to {server_addr}"))?;
     write_msg(
@@ -2238,6 +2262,7 @@ mod tests {
             nat_hole_waiters: Arc::new(Mutex::new(HashMap::new())),
             nat_hole_cached: Arc::new(Mutex::new(HashMap::new())),
             writer: Arc::new(Mutex::new(writer)),
+            quic_session: None,
         };
         (state, server)
     }

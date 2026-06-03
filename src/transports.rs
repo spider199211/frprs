@@ -402,12 +402,24 @@ pub mod tls {
 
 pub mod quic {
     use super::*;
-    use quinn::{ClientConfig, Endpoint, RecvStream, SendStream, ServerConfig};
+    use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig};
     use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 
     pub struct QuicServerEndpoint {
         endpoint: Endpoint,
         certificate_der: CertificateDer<'static>,
+    }
+
+    pub struct QuicAcceptedConnection {
+        connection: Connection,
+        remote_addr: SocketAddr,
+    }
+
+    #[derive(Clone)]
+    pub struct QuicClientSession {
+        endpoint: Endpoint,
+        connection: Connection,
+        remote_addr: SocketAddr,
     }
 
     pub struct QuicBiStream {
@@ -445,6 +457,10 @@ pub mod quic {
         }
 
         pub async fn accept_bi(&self) -> Result<QuicBiStream> {
+            self.accept_connection().await?.accept_bi().await
+        }
+
+        pub async fn accept_connection(&self) -> Result<QuicAcceptedConnection> {
             let incoming = self
                 .endpoint
                 .accept()
@@ -452,14 +468,33 @@ pub mod quic {
                 .ok_or_else(|| anyhow!("quic endpoint closed"))?;
             let connection = incoming.await.context("accept quic connection")?;
             let remote_addr = connection.remote_address();
-            let (send, recv) = connection
+            Ok(QuicAcceptedConnection {
+                connection,
+                remote_addr,
+            })
+        }
+
+        pub async fn accept_stream(&self) -> Result<QuicStream> {
+            let stream = self.accept_bi().await?;
+            Ok(stream.into_stream(None))
+        }
+    }
+
+    impl QuicAcceptedConnection {
+        pub fn remote_addr(&self) -> SocketAddr {
+            self.remote_addr
+        }
+
+        pub async fn accept_bi(&self) -> Result<QuicBiStream> {
+            let (send, recv) = self
+                .connection
                 .accept_bi()
                 .await
                 .context("accept quic bidirectional stream")?;
             Ok(QuicBiStream {
                 send,
                 recv,
-                remote_addr,
+                remote_addr: self.remote_addr,
             })
         }
 
@@ -539,27 +574,49 @@ pub mod quic {
         ))
     }
 
-    pub async fn connect_stream_insecure(server_addr: SocketAddr) -> Result<QuicStream> {
-        let mut endpoint = Endpoint::client("0.0.0.0:0".parse().expect("valid udp bind addr"))
-            .context("create quic client endpoint")?;
-        endpoint.set_default_client_config(insecure_client_config()?);
+    impl QuicClientSession {
+        pub async fn connect_insecure(server_addr: SocketAddr) -> Result<Self> {
+            let mut endpoint = Endpoint::client("0.0.0.0:0".parse().expect("valid udp bind addr"))
+                .context("create quic client endpoint")?;
+            endpoint.set_default_client_config(insecure_client_config()?);
 
-        let connection = endpoint
-            .connect(server_addr, "localhost")
-            .with_context(|| format!("start quic connect to {server_addr}"))?
+            let connection = endpoint
+                .connect(server_addr, "localhost")
+                .with_context(|| format!("start quic connect to {server_addr}"))?
+                .await
+                .with_context(|| format!("connect quic server {server_addr}"))?;
+            let remote_addr = connection.remote_address();
+            Ok(Self {
+                endpoint,
+                connection,
+                remote_addr,
+            })
+        }
+
+        pub async fn open_bi(&self) -> Result<QuicBiStream> {
+            let (send, recv) = self
+                .connection
+                .open_bi()
+                .await
+                .context("open quic bidirectional stream")?;
+            Ok(QuicBiStream {
+                send,
+                recv,
+                remote_addr: self.remote_addr,
+            })
+        }
+
+        pub async fn open_stream(&self) -> Result<QuicStream> {
+            let stream = self.open_bi().await?;
+            Ok(stream.into_stream(Some(self.endpoint.clone())))
+        }
+    }
+
+    pub async fn connect_stream_insecure(server_addr: SocketAddr) -> Result<QuicStream> {
+        QuicClientSession::connect_insecure(server_addr)
+            .await?
+            .open_stream()
             .await
-            .with_context(|| format!("connect quic server {server_addr}"))?;
-        let remote_addr = connection.remote_address();
-        let (send, recv) = connection
-            .open_bi()
-            .await
-            .context("open quic bidirectional stream")?;
-        Ok(QuicStream {
-            send,
-            recv,
-            remote_addr,
-            _endpoint: Some(endpoint),
-        })
     }
 
     fn configure_client(server_cert: CertificateDer<'static>) -> Result<ClientConfig> {

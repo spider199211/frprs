@@ -11,7 +11,7 @@ This file tracks the Rust rewrite against the upstream `fatedier/frp` feature su
 | UDP proxy | Implemented | Request/response forwarding, local NAT session reuse, bidirectional batching, batch destination caching, and groups are implemented. Deeper packet-path optimizations remain. |
 | HTTP proxy | Implemented | Routes by `Host`, wildcard domains, `locations`, header rewrite, Basic Auth, real IP headers, and groups. |
 | HTTPS proxy | Implemented | Routes by TLS SNI / `customDomains`, wildcard domains, `*` fallback, groups, and raw passthrough. |
-| Connection pool | Implemented | `poolCount` pre-opens work connections, coalesces replenishment, and requests only immediate waiter demand. |
+| Connection pool | Implemented | `poolCount` pre-opens work connections, coalesces replenishment, requests only immediate waiter demand, and reuses QUIC client sessions for control/work/visitor streams. |
 | Bandwidth limiting | Implemented | `bandwidthLimit` throttles TCP/HTTP/HTTPS stream copy. |
 | Hot reload | Implemented | `frpc` watches config mtime and reconnects when the file changes. |
 | Dashboard | Implemented | Built-in HTML status page plus clients, proxies, groups, status, and metrics JSON APIs. |
@@ -21,7 +21,7 @@ This file tracks the Rust rewrite against the upstream `fatedier/frp` feature su
 | XTCP / P2P | Implemented | NAT controller, multiple peers per transaction, candidate exchange, async notifications, XTCP direct data plane, SUDP direct data plane, probing/retry, owner punch retry, and fallback are implemented. Complex NAT scenarios still need broader validation and tuning. |
 | TLS transport | Implemented | Uses rustls for control/work connections and has end-to-end proxy coverage. |
 | WebSocket transport | Implemented | Uses HTTP upgrade transport and has end-to-end proxy coverage. |
-| QUIC transport | Implemented | Uses `quinn` for control/work connections and has end-to-end proxy coverage. Current client uses self-signed/insecure verification for local deployment. |
+| QUIC transport | Implemented | Uses `quinn` for control/work connections, reuses one client connection for multiple bidirectional streams, and has end-to-end proxy coverage. Current client uses self-signed/insecure verification for local deployment. |
 | KCP transport | Implemented | Uses `tokio_kcp` for control/work connections and has end-to-end proxy coverage. |
 | TCP stream multiplexing | Not implemented | Candidate crate: `yamux`. |
 | Load balancing / groups | Implemented | TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/XTCP/SUDP groups are implemented. |
@@ -49,5 +49,6 @@ Current tested flows:
 - TCP proxy over TLS and WebSocket transports.
 - TCP proxy over KCP transport.
 - TCP proxy over QUIC transport.
+- QUIC transport reusing one connection for multiple bidirectional streams.
 - NAT hole controller candidate exchange.
 - Raw TLS, WebSocket, QUIC, and KCP transport round trips.

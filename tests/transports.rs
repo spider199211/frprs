@@ -42,6 +42,44 @@ async fn quic_bi_stream_round_trips_bytes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_client_session_reuses_connection_for_multiple_streams() {
+    let server = quic::QuicServerEndpoint::bind(loopback_any_port()).unwrap();
+    let server_addr = server.local_addr().unwrap();
+
+    let server_task = tokio::spawn(async move {
+        let connection = server.accept_connection().await.unwrap();
+        for expected in [b"first stream".as_slice(), b"second stream".as_slice()] {
+            let mut stream = timeout(Duration::from_secs(5), connection.accept_bi())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut request = vec![0_u8; expected.len()];
+            stream.recv.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, expected);
+            stream.send.write_all(b"ok").await.unwrap();
+            stream.send.finish().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    });
+
+    let session = quic::QuicClientSession::connect_insecure(server_addr)
+        .await
+        .unwrap();
+    for payload in [b"first stream".as_slice(), b"second stream".as_slice()] {
+        let mut stream = session.open_stream().await.unwrap();
+        stream.write_all(payload).await.unwrap();
+        let mut response = [0_u8; 2];
+        timeout(Duration::from_secs(5), stream.read_exact(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&response, b"ok");
+    }
+
+    server_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kcp_stream_round_trips_bytes() {
     let mut listener = kcp::bind(loopback_any_port()).await.unwrap();
     let server_addr = listener.local_addr().unwrap();

@@ -471,12 +471,24 @@ async fn run_quic_control_listener(state: ServerState) -> Result<()> {
     info!("frps quic control listening on {local_addr}");
 
     loop {
-        let stream = endpoint.accept_stream().await?;
-        let peer = stream.remote_addr;
+        let connection = endpoint.accept_connection().await?;
+        let peer = connection.remote_addr();
         let state = state.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_connection(state, Box::new(stream), peer).await {
-                debug!("quic connection {peer} closed: {err:#}");
+            loop {
+                let stream = match connection.accept_stream().await {
+                    Ok(stream) => stream,
+                    Err(err) => {
+                        debug!("quic connection {peer} stream accept stopped: {err:#}");
+                        break;
+                    }
+                };
+                let state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = handle_connection(state, Box::new(stream), peer).await {
+                        debug!("quic stream {peer} closed: {err:#}");
+                    }
+                });
             }
         });
     }
