@@ -18,7 +18,7 @@ This file tracks the Rust rewrite against the upstream `fatedier/frp` feature su
 | Plugins | Implemented | Server-side plain HTTP hooks for login, new-proxy, TCP/UDP/SUDP/HTTP/HTTPS/TCPMUX new-user-connection, and close-proxy events; client-side local-connect hook covers TCP/UDP/SUDP. |
 | TCPMux HTTP CONNECT | Implemented | HTTP CONNECT parser, domain routing, and grouped mux listeners are implemented. |
 | STCP / SUDP | Implemented | STCP and SUDP have visitor config, `sk` auth, local visitor listeners, group load balancing, and end-to-end forwarding. |
-| XTCP / P2P | Basic implemented | NAT controller, candidate exchange, async notifications, XTCP direct data plane, SUDP direct data plane, probing/retry, and fallback are implemented. Complex NAT negotiation remains. |
+| XTCP / P2P | Implemented | NAT controller, multiple peers per transaction, candidate exchange, async notifications, XTCP direct data plane, SUDP direct data plane, probing/retry, owner punch retry, and fallback are implemented. Complex NAT scenarios still need broader validation and tuning. |
 | TLS transport | Implemented | Uses rustls for control/work connections and has end-to-end proxy coverage. |
 | WebSocket transport | Implemented | Uses HTTP upgrade transport and has end-to-end proxy coverage. |
 | QUIC transport | Implemented | Uses `quinn` for control/work connections and has end-to-end proxy coverage. Current client uses self-signed/insecure verification for local deployment. |

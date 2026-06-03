@@ -58,8 +58,10 @@ pub struct NatHoleController {
 #[derive(Debug)]
 struct NatHoleSession {
     proxy_name: String,
-    server: Option<NatHolePeer>,
-    visitor: Option<NatHolePeer>,
+    servers: Vec<NatHolePeer>,
+    visitors: Vec<NatHolePeer>,
+    next_server: usize,
+    next_visitor: usize,
     updated_at: Instant,
 }
 
@@ -92,8 +94,10 @@ impl NatHoleController {
             .entry(peer.transaction_id.clone())
             .or_insert_with(|| NatHoleSession {
                 proxy_name: peer.proxy_name.clone(),
-                server: None,
-                visitor: None,
+                servers: Vec::new(),
+                visitors: Vec::new(),
+                next_server: 0,
+                next_visitor: 0,
                 updated_at: Instant::now(),
             });
 
@@ -106,14 +110,16 @@ impl NatHoleController {
         }
 
         match peer.role {
-            NatHoleRole::Server => session.server = Some(peer.clone()),
-            NatHoleRole::Visitor => session.visitor = Some(peer.clone()),
+            NatHoleRole::Server => Self::upsert_peer(&mut session.servers, peer.clone()),
+            NatHoleRole::Visitor => Self::upsert_peer(&mut session.visitors, peer.clone()),
         }
         session.updated_at = Instant::now();
 
-        Ok(Self::candidate_from_session(session, peer.role)
-            .map(NatHoleOutcome::Matched)
-            .unwrap_or(NatHoleOutcome::Waiting))
+        Ok(
+            Self::candidate_from_session(session, peer.role, Some(&peer.run_id))
+                .map(NatHoleOutcome::Matched)
+                .unwrap_or(NatHoleOutcome::Waiting),
+        )
     }
 
     pub fn candidate_for(
@@ -124,8 +130,8 @@ impl NatHoleController {
         let mut sessions = self.sessions.lock().expect("nathole mutex poisoned");
         Self::cleanup_locked(&mut sessions, self.ttl);
         sessions
-            .get(transaction_id)
-            .and_then(|session| Self::candidate_from_session(session, role))
+            .get_mut(transaction_id)
+            .and_then(|session| Self::candidate_from_session(session, role, None))
     }
 
     pub fn remove(&self, transaction_id: &str) -> bool {
@@ -136,14 +142,44 @@ impl NatHoleController {
             .is_some()
     }
 
+    fn upsert_peer(peers: &mut Vec<NatHolePeer>, peer: NatHolePeer) {
+        if let Some(existing) = peers
+            .iter_mut()
+            .find(|existing| existing.run_id == peer.run_id)
+        {
+            *existing = peer;
+        } else {
+            peers.push(peer);
+        }
+    }
+
     fn candidate_from_session(
-        session: &NatHoleSession,
+        session: &mut NatHoleSession,
         role: NatHoleRole,
+        current_run_id: Option<&str>,
     ) -> Option<NatHoleCandidate> {
-        let peer = match role.opposite() {
-            NatHoleRole::Server => session.server.as_ref()?,
-            NatHoleRole::Visitor => session.visitor.as_ref()?,
+        let (peers, next) = match role.opposite() {
+            NatHoleRole::Server => (&session.servers, &mut session.next_server),
+            NatHoleRole::Visitor => (&session.visitors, &mut session.next_visitor),
         };
+        if peers.is_empty() {
+            return None;
+        }
+
+        let mut selected = None;
+        for _ in 0..peers.len() {
+            let index = *next % peers.len();
+            *next = (*next).wrapping_add(1);
+            let peer = &peers[index];
+            if current_run_id
+                .map(|run_id| run_id != peer.run_id)
+                .unwrap_or(true)
+            {
+                selected = Some(peer);
+                break;
+            }
+        }
+        let peer = selected?;
 
         Some(NatHoleCandidate {
             transaction_id: peer.transaction_id.clone(),
@@ -213,5 +249,126 @@ mod tests {
             .expect("owner should see visitor candidate");
         assert_eq!(owner_candidate.peer_run_id, "visitor");
         assert_eq!(owner_candidate.observed_addr, addr(7002));
+    }
+
+    #[test]
+    fn keeps_multiple_peers_per_role_for_shared_transaction() {
+        let controller = NatHoleController::default();
+
+        assert_eq!(
+            controller
+                .register(NatHolePeer {
+                    transaction_id: "tx-group".to_string(),
+                    proxy_name: "sudp-group".to_string(),
+                    run_id: "owner-a".to_string(),
+                    role: NatHoleRole::Server,
+                    observed_addr: addr(7001),
+                    local_addrs: vec![addr(10001)],
+                })
+                .unwrap(),
+            NatHoleOutcome::Waiting
+        );
+        assert_eq!(
+            controller
+                .register(NatHolePeer {
+                    transaction_id: "tx-group".to_string(),
+                    proxy_name: "sudp-group".to_string(),
+                    run_id: "visitor-a".to_string(),
+                    role: NatHoleRole::Visitor,
+                    observed_addr: addr(7002),
+                    local_addrs: vec![addr(10002)],
+                })
+                .unwrap(),
+            NatHoleOutcome::Matched(NatHoleCandidate {
+                transaction_id: "tx-group".to_string(),
+                proxy_name: "sudp-group".to_string(),
+                peer_run_id: "owner-a".to_string(),
+                peer_role: NatHoleRole::Server,
+                observed_addr: addr(7001),
+                local_addrs: vec![addr(10001)],
+            })
+        );
+        assert_eq!(
+            controller
+                .register(NatHolePeer {
+                    transaction_id: "tx-group".to_string(),
+                    proxy_name: "sudp-group".to_string(),
+                    run_id: "visitor-b".to_string(),
+                    role: NatHoleRole::Visitor,
+                    observed_addr: addr(7003),
+                    local_addrs: vec![addr(10003)],
+                })
+                .unwrap(),
+            NatHoleOutcome::Matched(NatHoleCandidate {
+                transaction_id: "tx-group".to_string(),
+                proxy_name: "sudp-group".to_string(),
+                peer_run_id: "owner-a".to_string(),
+                peer_role: NatHoleRole::Server,
+                observed_addr: addr(7001),
+                local_addrs: vec![addr(10001)],
+            })
+        );
+
+        let first = controller
+            .candidate_for("tx-group", NatHoleRole::Server)
+            .unwrap();
+        let second = controller
+            .candidate_for("tx-group", NatHoleRole::Server)
+            .unwrap();
+        assert_eq!(first.peer_run_id, "visitor-a");
+        assert_eq!(second.peer_run_id, "visitor-b");
+    }
+
+    #[test]
+    fn round_robins_multiple_server_peers_for_visitors() {
+        let controller = NatHoleController::default();
+
+        for (run_id, port) in [("owner-a", 7001), ("owner-b", 7002)] {
+            assert_eq!(
+                controller
+                    .register(NatHolePeer {
+                        transaction_id: "tx-group".to_string(),
+                        proxy_name: "xtcp-group".to_string(),
+                        run_id: run_id.to_string(),
+                        role: NatHoleRole::Server,
+                        observed_addr: addr(port),
+                        local_addrs: vec![addr(port + 1000)],
+                    })
+                    .unwrap(),
+                NatHoleOutcome::Waiting
+            );
+        }
+
+        let first = controller
+            .register(NatHolePeer {
+                transaction_id: "tx-group".to_string(),
+                proxy_name: "xtcp-group".to_string(),
+                run_id: "visitor-a".to_string(),
+                role: NatHoleRole::Visitor,
+                observed_addr: addr(8001),
+                local_addrs: vec![addr(9001)],
+            })
+            .unwrap();
+        let second = controller
+            .register(NatHolePeer {
+                transaction_id: "tx-group".to_string(),
+                proxy_name: "xtcp-group".to_string(),
+                run_id: "visitor-b".to_string(),
+                role: NatHoleRole::Visitor,
+                observed_addr: addr(8002),
+                local_addrs: vec![addr(9002)],
+            })
+            .unwrap();
+
+        match (first, second) {
+            (
+                NatHoleOutcome::Matched(first_candidate),
+                NatHoleOutcome::Matched(second_candidate),
+            ) => {
+                assert_eq!(first_candidate.peer_run_id, "owner-a");
+                assert_eq!(second_candidate.peer_run_id, "owner-b");
+            }
+            other => panic!("unexpected outcomes: {other:?}"),
+        }
     }
 }
