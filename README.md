@@ -39,7 +39,7 @@ This is a Rust rewrite scaffold for `fatedier/frp`.
 - STCP/XTCP 私有 visitor 协议，支持 `sk` 密钥校验和本地 visitor 监听；XTCP 可在 peer 可达时直连，失败时回退服务端中继
 - STCP/XTCP `group`/`groupKey` 私有服务分组负载均衡，visitor 可通过分组名轮询访问后端
 - SUDP 私有 visitor 协议，支持 `sk` 密钥校验、`group`/`groupKey` 分组负载均衡、peer 可达时按代理名或分组名直连 UDP 转发、probe 选路、短时 probe 重试、直连确认和服务端中继 fallback
-- NAT 打洞控制器、控制通道候选地址交换、双端匹配通知、客户端异步通知缓存、SUDP owner 主动 punch、SUDP 分组直连注册、候选优选、XTCP 候选竞速、SUDP 候选探测和重试
+- NAT 打洞控制器、控制通道候选地址交换、双端匹配通知、客户端异步通知缓存、XTCP/SUDP 分组直连注册、SUDP owner 主动 punch、候选优选、XTCP 候选竞速、SUDP 候选探测和重试
 - 通过 `transport.protocol` 支持 TCP、TLS、WebSocket、QUIC、KCP 控制/工作连接传输
 - 按 visitor 请求 work connection
 - 双向 TCP 字节转发
@@ -272,7 +272,7 @@ cargo run --bin frpc -- -c conf/frpc.toml
 - 热加载：`frpc` 会监听配置文件修改时间并自动重连。
 - TLS/WebSocket/QUIC/KCP：已实现真实控制/工作连接传输，并有端到端代理测试覆盖。
 - STCP/XTCP：已实现 TCP 流的私有 visitor 转发和分组负载均衡；XTCP 已支持可达 peer 的直连数据面，并保留服务端中继 fallback。
-- SUDP/XTCP/P2P：已实现 XTCP/SUDP 直连优先数据面、SUDP 私有服务分组负载均衡、SUDP 按分组名直连注册与探测、SUDP probe 选路与短时重试、SUDP owner 主动 punch、SUDP 直连确认/未确认回退、服务端中继 fallback、NAT 双端匹配通知、客户端异步通知缓存、候选优选、XTCP 候选竞速和 NAT 控制器基础；更完整的 NAT 打洞协商和复杂 NAT 场景仍待实现。
+- SUDP/XTCP/P2P：已实现 XTCP/SUDP 直连优先数据面、SUDP 私有服务分组负载均衡、XTCP/SUDP 按分组名直连注册与探测、SUDP probe 选路与短时重试、SUDP owner 主动 punch、SUDP 直连确认/未确认回退、服务端中继 fallback、NAT 双端匹配通知、客户端异步通知缓存、候选优选、XTCP 候选竞速和 NAT 控制器基础；更完整的 NAT 打洞协商和复杂 NAT 场景仍待实现。
 - Transport/热路径：已补 TLS、WebSocket、基础 TCP mux、work connection 补池合并、等待者按需请求和 UDP 批处理缓存；后续继续补更完整的 mux 连接复用能力。
 - 运行时控制：已补轻量 Admin API、更多状态 API、指标接口、指标重置、按代理/分组/客户端关闭能力和 `allowPorts` 运行时更新；后续补更完整的运行时配置管理。
 - 策略能力：已补端口白名单和 TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/XTCP/SUDP 分组负载均衡；后续补更多协议的分组能力。
@@ -314,7 +314,7 @@ The current milestone implements the core reverse TCP proxy path:
 - STCP/XTCP private visitor protocols with `sk` authentication and local visitor listeners; XTCP connects directly when the peer is reachable and falls back to server relay otherwise
 - STCP/XTCP `group`/`groupKey` load balancing, allowing visitors to target a private service group
 - SUDP private visitor protocol with `sk` authentication, `group`/`groupKey` load balancing, direct UDP forwarding by proxy name or group name when the peer is reachable, probe-based path selection, short probe retries, direct confirmation, and server-relay fallback
-- NAT hole punching controller, control-channel candidate exchange, two-sided match notification, client-side async notification caching, SUDP owner-side active punching, SUDP group direct registration, candidate preference, XTCP candidate racing, and SUDP candidate probing/retry
+- NAT hole punching controller, control-channel candidate exchange, two-sided match notification, client-side async notification caching, XTCP/SUDP group direct registration, SUDP owner-side active punching, candidate preference, XTCP candidate racing, and SUDP candidate probing/retry
 - TCP, TLS, WebSocket, QUIC, and KCP control/work transports via `transport.protocol`
 - per-visitor work connection request
 - bidirectional TCP byte forwarding
@@ -499,7 +499,7 @@ Parity roadmap:
 - Hot reload: frpc watches config file mtime and reconnects on change.
 - TLS/WebSocket/QUIC/KCP: real control/work transports implemented and covered by end-to-end proxy tests.
 - STCP/XTCP: private visitor flow and group load balancing implemented for TCP streams; XTCP now has a direct data path for reachable peers plus server-relay fallback.
-- SUDP/XTCP/P2P: XTCP/SUDP direct-first data paths, SUDP private-service group load balancing, SUDP direct registration and probing by group name, SUDP probe-based path selection with short retries, SUDP owner-side active punching, SUDP direct confirmation/unconfirmed fallback, server-relay fallback, two-sided NAT match notification, client-side async notification caching, candidate preference, XTCP candidate racing, and the NAT controller foundation are implemented; fuller NAT-hole negotiation and complex NAT scenarios remain.
+- SUDP/XTCP/P2P: XTCP/SUDP direct-first data paths, SUDP private-service group load balancing, XTCP/SUDP direct registration and probing by group name, SUDP probe-based path selection with short retries, SUDP owner-side active punching, SUDP direct confirmation/unconfirmed fallback, server-relay fallback, two-sided NAT match notification, client-side async notification caching, candidate preference, XTCP candidate racing, and the NAT controller foundation are implemented; fuller NAT-hole negotiation and complex NAT scenarios remain.
 - Transport/hot paths: TLS, WebSocket, basic TCP mux, work-connection replenish coalescing, waiter demand-aware requests, and UDP batch-path caching implemented; add fuller mux connection reuse and more connection-pool tuning.
 - Runtime controls: lightweight Admin API, richer status APIs, metrics endpoint/reset, proxy/group/client close operations, and runtime `allowPorts` updates implemented; full runtime config management remains.
 - Policy: allow ports and TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/XTCP/SUDP group load balancing implemented; broader protocol group support remains.

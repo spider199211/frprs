@@ -2013,12 +2013,14 @@ async fn start_stcp_proxy(
         sk: sk.clone(),
         bandwidth_limit,
     };
+    let mut entry_group = group.clone();
 
     let remote_addr = if let Some(group_name) = group.clone() {
         if group_name.trim().is_empty() {
             bail!("stcp proxy {proxy_name} has empty group");
         }
         let group_name = group_name.trim().to_string();
+        entry_group = Some(group_name.clone());
         let mut groups = state.stcp_groups.lock().await;
         if let Some(existing) = groups.get_mut(&group_name) {
             if existing.group_key != group_key {
@@ -2065,7 +2067,7 @@ async fn start_stcp_proxy(
         ProxyEntry {
             run_id: control.run_id.clone(),
             proxy_type: "stcp".to_string(),
-            group,
+            group: entry_group,
             tcp_group_map_key: None,
             udp_group_map_key: None,
             domains: Vec::new(),
@@ -2094,12 +2096,14 @@ async fn start_xtcp_proxy(
         sk: sk.clone(),
         bandwidth_limit,
     };
+    let mut entry_group = group.clone();
 
     let remote_addr = if let Some(group_name) = group.clone() {
         if group_name.trim().is_empty() {
             bail!("xtcp proxy {proxy_name} has empty group");
         }
         let group_name = group_name.trim().to_string();
+        entry_group = Some(group_name.clone());
         let mut groups = state.xtcp_groups.lock().await;
         if let Some(existing) = groups.get_mut(&group_name) {
             if existing.group_key != group_key {
@@ -2146,7 +2150,7 @@ async fn start_xtcp_proxy(
         ProxyEntry {
             run_id: control.run_id.clone(),
             proxy_type: "xtcp".to_string(),
-            group,
+            group: entry_group,
             tcp_group_map_key: None,
             udp_group_map_key: None,
             domains: Vec::new(),
