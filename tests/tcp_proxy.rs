@@ -1689,6 +1689,129 @@ async fn xtcp_group_visitor_forwards_bytes_directly_when_peer_reachable() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn xtcp_visitor_waits_for_delayed_owner_nat_notification() {
+    let _guard = acquire_test_lock().await;
+    let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let echo_port = echo.local_addr().unwrap().port();
+    let echo_task = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = echo.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut buf = [0_u8; 1024];
+                loop {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    stream.write_all(&buf[..n]).await.unwrap();
+                }
+            });
+        }
+    });
+
+    let bind_port = unused_port();
+    let visitor_port = unused_port();
+    let dashboard_port = unused_port();
+    let server_cfg = ServerConfig {
+        bind_addr: "127.0.0.1".to_string(),
+        bind_port,
+        proxy_bind_addr: "127.0.0.1".to_string(),
+        vhost_http_port: 0,
+        vhost_https_port: 0,
+        dashboard_addr: "127.0.0.1".to_string(),
+        dashboard_port,
+        allow_ports: Vec::new(),
+        auth: AuthConfig {
+            token: Some("secret".to_string()),
+        },
+        plugins: ServerPluginConfig::default(),
+        transport: TransportConfig::default(),
+    };
+    let server_task = tokio::spawn(server::run(server_cfg));
+    sleep(Duration::from_millis(100)).await;
+
+    let visitor_cfg = ClientConfig {
+        server_addr: "127.0.0.1".to_string(),
+        server_port: bind_port,
+        auth: AuthConfig {
+            token: Some("secret".to_string()),
+        },
+        pool_count: 0,
+        transport: TransportConfig::default(),
+        plugins: Default::default(),
+        proxies: Vec::new(),
+        visitors: vec![VisitorConfig {
+            name: "local-delayed-xtcp".to_string(),
+            visitor_type: ProxyType::Xtcp,
+            server_name: "delayed-xtcp".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: visitor_port,
+            sk: Some("private".to_string()),
+        }],
+    };
+    let visitor_task = tokio::spawn(client::run(visitor_cfg));
+    sleep(Duration::from_millis(150)).await;
+
+    let mut stream = connect_with_retry(format!("127.0.0.1:{visitor_port}")).await;
+    let pending_write = tokio::spawn(async move {
+        stream.write_all(b"hello delayed xtcp").await.unwrap();
+        let mut got = vec![0_u8; "hello delayed xtcp".len()];
+        stream.read_exact(&mut got).await.unwrap();
+        got
+    });
+
+    sleep(Duration::from_millis(120)).await;
+    let owner_cfg = ClientConfig {
+        server_addr: "127.0.0.1".to_string(),
+        server_port: bind_port,
+        auth: AuthConfig {
+            token: Some("secret".to_string()),
+        },
+        pool_count: 0,
+        transport: TransportConfig::default(),
+        plugins: Default::default(),
+        proxies: vec![ProxyConfig {
+            name: "delayed-xtcp".to_string(),
+            proxy_type: ProxyType::Xtcp,
+            local_ip: "127.0.0.1".to_string(),
+            local_port: echo_port,
+            remote_port: 0,
+            group: None,
+            group_key: None,
+            custom_domains: Vec::new(),
+            locations: Vec::new(),
+            host_header_rewrite: None,
+            request_headers: Default::default(),
+            http_user: None,
+            http_password: None,
+            bandwidth_limit: None,
+            sk: Some("private".to_string()),
+            health_check: None,
+        }],
+        visitors: Vec::new(),
+    };
+    let owner_task = tokio::spawn(client::run(owner_cfg));
+
+    let got = tokio::time::timeout(Duration::from_secs(5), pending_write)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got, b"hello delayed xtcp");
+
+    let metrics = http_request(
+        format!("127.0.0.1:{dashboard_port}"),
+        b"GET /api/metrics HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )
+    .await;
+    assert!(metrics.contains("\"visitor_connections_total\":0"));
+
+    owner_task.abort();
+    visitor_task.abort();
+    server_task.abort();
+    echo_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stcp_group_load_balances_between_members() {
     let _guard = acquire_test_lock().await;
     let local_a = TcpListener::bind("127.0.0.1:0").await.unwrap();

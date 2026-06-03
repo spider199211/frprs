@@ -480,6 +480,47 @@ async fn request_nat_hole(
     Ok(resp)
 }
 
+async fn request_nat_hole_with_grace(
+    state: &ClientState,
+    transaction_id: &str,
+    proxy_name: &str,
+    role: &str,
+    local_addrs: Vec<String>,
+    grace: Duration,
+) -> Result<NatHoleResponse> {
+    let resp = request_nat_hole(state, transaction_id, proxy_name, role, local_addrs).await?;
+    if !resp.waiting || grace.is_zero() {
+        return Ok(resp);
+    }
+
+    let key = nat_hole_waiter_key(transaction_id, role);
+    if let Some(resp) = state.nat_hole_cached.lock().await.remove(&key) {
+        if !resp.error.is_empty() {
+            bail!("nat hole register failed: {}", resp.error);
+        }
+        return Ok(resp);
+    }
+
+    let (tx, rx) = oneshot::channel();
+    state.nat_hole_waiters.lock().await.insert(key.clone(), tx);
+    match time::timeout(grace, rx).await {
+        Ok(Ok(resp)) => {
+            if !resp.error.is_empty() {
+                bail!("nat hole register failed: {}", resp.error);
+            }
+            Ok(resp)
+        }
+        Ok(Err(_)) => {
+            state.nat_hole_waiters.lock().await.remove(&key);
+            Ok(resp)
+        }
+        Err(_) => {
+            state.nat_hole_waiters.lock().await.remove(&key);
+            Ok(resp)
+        }
+    }
+}
+
 async fn punch_sudp_owner_candidates(
     state: &ClientState,
     proxy_name: &str,
@@ -753,12 +794,13 @@ async fn try_xtcp_direct_visitor(
     visitor: &VisitorConfig,
     inbound: &mut TcpStream,
 ) -> Result<bool> {
-    let resp = match request_nat_hole(
+    let resp = match request_nat_hole_with_grace(
         state,
         &visitor.server_name,
         &visitor.server_name,
         "visitor",
         Vec::new(),
+        Duration::from_millis(500),
     )
     .await
     {
@@ -2242,6 +2284,77 @@ mod tests {
             .lock()
             .await
             .contains_key(&nat_hole_waiter_key("tx-cache", "visitor")));
+    }
+
+    #[tokio::test]
+    async fn request_nat_hole_with_grace_uses_async_notification_after_waiting() {
+        let (state, mut server) = test_state();
+        let request_state = state.clone();
+        let request = tokio::spawn(async move {
+            request_nat_hole_with_grace(
+                &request_state,
+                "xtcp-delayed",
+                "xtcp-delayed",
+                "visitor",
+                Vec::new(),
+                Duration::from_secs(1),
+            )
+            .await
+        });
+
+        match time::timeout(Duration::from_secs(1), read_msg(&mut server))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Message::NatHoleRegister {
+                transaction_id,
+                proxy_name,
+                role,
+                ..
+            } => {
+                assert_eq!(transaction_id, "xtcp-delayed");
+                assert_eq!(proxy_name, "xtcp-delayed");
+                assert_eq!(role, "visitor");
+            }
+            other => panic!("unexpected nat hole register: {other:?}"),
+        }
+
+        handle_nat_hole_response(
+            &state,
+            "xtcp-delayed".to_string(),
+            "xtcp-delayed".to_string(),
+            "visitor".to_string(),
+            NatHoleResponse {
+                peer_observed_addr: String::new(),
+                peer_local_addrs: Vec::new(),
+                waiting: true,
+                error: String::new(),
+            },
+        )
+        .await;
+        handle_nat_hole_response(
+            &state,
+            "xtcp-delayed".to_string(),
+            "xtcp-delayed".to_string(),
+            "visitor".to_string(),
+            NatHoleResponse {
+                peer_observed_addr: "127.0.0.1:7001".to_string(),
+                peer_local_addrs: vec!["10.0.0.10:10001".to_string()],
+                waiting: false,
+                error: String::new(),
+            },
+        )
+        .await;
+
+        let resp = time::timeout(Duration::from_secs(1), request)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!resp.waiting);
+        assert_eq!(resp.peer_observed_addr, "127.0.0.1:7001");
+        assert_eq!(resp.peer_local_addrs, vec!["10.0.0.10:10001"]);
     }
 
     #[tokio::test]
