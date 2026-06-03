@@ -40,6 +40,7 @@ struct ServerState {
     xtcp_routes: Arc<Mutex<HashMap<String, StcpRoute>>>,
     xtcp_groups: Arc<Mutex<HashMap<String, StcpGroup>>>,
     sudp_routes: Arc<Mutex<HashMap<String, SudpRoute>>>,
+    sudp_groups: Arc<Mutex<HashMap<String, SudpGroup>>>,
     sudp_sessions: Arc<Mutex<HashMap<(String, String), Arc<Control>>>>,
     tcp_groups: Arc<Mutex<HashMap<String, TcpGroup>>>,
     udp_groups: Arc<Mutex<HashMap<String, UdpGroup>>>,
@@ -102,6 +103,14 @@ struct SudpRoute {
     control: Arc<Control>,
     proxy_name: String,
     sk: Option<String>,
+}
+
+struct SudpGroup {
+    group_name: String,
+    group_key: Option<String>,
+    sk: Option<String>,
+    routes: Vec<SudpRoute>,
+    next: usize,
 }
 
 #[derive(Clone)]
@@ -259,6 +268,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         xtcp_routes: Arc::new(Mutex::new(HashMap::new())),
         xtcp_groups: Arc::new(Mutex::new(HashMap::new())),
         sudp_routes: Arc::new(Mutex::new(HashMap::new())),
+        sudp_groups: Arc::new(Mutex::new(HashMap::new())),
         sudp_sessions: Arc::new(Mutex::new(HashMap::new())),
         tcp_groups: Arc::new(Mutex::new(HashMap::new())),
         udp_groups: Arc::new(Mutex::new(HashMap::new())),
@@ -1032,7 +1042,18 @@ async fn start_proxy(
             )
             .await
         }
-        "sudp" => start_sudp_proxy(state, control, proxy_name, sk, bandwidth_limit).await,
+        "sudp" => {
+            start_sudp_proxy(
+                state,
+                control,
+                proxy_name,
+                group,
+                group_key,
+                sk,
+                bandwidth_limit,
+            )
+            .await
+        }
         "xtcp" => {
             start_xtcp_proxy(
                 state,
@@ -1646,10 +1667,13 @@ async fn handle_sudp_packet(
         let content_len = content.len() as u64;
         let route = {
             let routes = state.sudp_routes.lock().await;
-            routes
-                .get(&proxy_name)
-                .cloned()
-                .ok_or_else(|| anyhow!("unknown sudp proxy {proxy_name}"))?
+            routes.get(&proxy_name).cloned()
+        };
+        let route = match route {
+            Some(route) => route,
+            None => next_sudp_group_route(state.clone(), &proxy_name)
+                .await
+                .ok_or_else(|| anyhow!("unknown sudp proxy {proxy_name}"))?,
         };
         if route.sk != sk {
             bail!("sudp secret key mismatch for proxy {proxy_name}");
@@ -2073,29 +2097,71 @@ async fn start_sudp_proxy(
     state: ServerState,
     control: Arc<Control>,
     proxy_name: String,
+    group: Option<String>,
+    group_key: Option<String>,
     sk: Option<String>,
     bandwidth_limit: Option<u64>,
 ) -> Result<String> {
-    let remote_addr = format!("sudp://{proxy_name}");
     let route = SudpRoute {
         control: control.clone(),
         proxy_name: proxy_name.clone(),
-        sk,
+        sk: sk.clone(),
     };
+    let mut entry_group = group.clone();
 
-    state
-        .sudp_routes
-        .lock()
-        .await
-        .insert(proxy_name.clone(), route);
-    info!("sudp proxy {proxy_name} registered");
+    let remote_addr = if let Some(group_name) = group.clone() {
+        if group_name.trim().is_empty() {
+            bail!("sudp proxy {proxy_name} has empty group");
+        }
+        let group_name = group_name.trim().to_string();
+        entry_group = Some(group_name.clone());
+        let mut groups = state.sudp_groups.lock().await;
+        if let Some(existing) = groups.get_mut(&group_name) {
+            if existing.group_key != group_key {
+                bail!("sudp group {group_name} groupKey mismatch");
+            }
+            if existing.sk != sk {
+                bail!("sudp group {group_name} sk mismatch");
+            }
+            if existing
+                .routes
+                .iter()
+                .any(|route| route.proxy_name == proxy_name)
+            {
+                bail!("sudp group {group_name} already contains proxy {proxy_name}");
+            }
+            existing.routes.push(route);
+        } else {
+            groups.insert(
+                group_name.clone(),
+                SudpGroup {
+                    group_name: group_name.clone(),
+                    group_key,
+                    sk,
+                    routes: vec![route],
+                    next: 0,
+                },
+            );
+        }
+        info!("sudp proxy {proxy_name} registered in group {group_name}");
+        format!("sudp://{group_name}")
+    } else {
+        let remote_addr = format!("sudp://{proxy_name}");
+        state
+            .sudp_routes
+            .lock()
+            .await
+            .insert(proxy_name.clone(), route);
+        info!("sudp proxy {proxy_name} registered");
+        remote_addr
+    };
 
     state.proxy_entries.lock().await.insert(
         proxy_name,
         ProxyEntry {
             run_id: control.run_id.clone(),
             proxy_type: "sudp".to_string(),
-            group: None,
+            group: entry_group,
             tcp_group_map_key: None,
             udp_group_map_key: None,
             domains: Vec::new(),
@@ -2107,6 +2173,17 @@ async fn start_sudp_proxy(
         },
     );
     Ok(remote_addr)
+}
+
+async fn next_sudp_group_route(state: ServerState, group_name: &str) -> Option<SudpRoute> {
+    let mut groups = state.sudp_groups.lock().await;
+    let group = groups.get_mut(group_name)?;
+    if group.routes.is_empty() {
+        return None;
+    }
+    let index = group.next % group.routes.len();
+    group.next = group.next.wrapping_add(1);
+    group.routes.get(index).cloned()
 }
 
 async fn handle_tcp_visitor(
@@ -2511,6 +2588,19 @@ async fn tcp_group_list_json(state: &ServerState) -> Result<serde_json::Value> {
         })
     }));
     drop(xtcp_groups);
+
+    let sudp_groups = state.sudp_groups.lock().await;
+    group_list.extend(sudp_groups.values().map(|group| {
+        json!({
+            "protocol": "sudp",
+            "group": group.group_name,
+            "remote_port": null,
+            "remote_addr": format!("sudp://{}", group.group_name),
+            "member_count": group.routes.len(),
+            "members": group.routes.iter().map(|route| route.proxy_name.clone()).collect::<Vec<_>>(),
+        })
+    }));
+    drop(sudp_groups);
 
     let proxies = state.proxy_entries.lock().await;
     let mut vhost_groups: HashMap<(String, String), (String, Vec<String>)> = HashMap::new();
@@ -3132,6 +3222,17 @@ async fn close_proxy(state: ServerState, proxy_name: &str) -> Result<bool> {
             state.xtcp_routes.lock().await.remove(proxy_name);
         }
         "sudp" => {
+            if let Some(group_name) = entry.group {
+                let mut groups = state.sudp_groups.lock().await;
+                if let Some(group) = groups.get_mut(&group_name) {
+                    group.routes.retain(|route| route.proxy_name != proxy_name);
+                    if group.routes.is_empty() {
+                        groups.remove(&group_name);
+                    } else if group.next >= group.routes.len() {
+                        group.next = 0;
+                    }
+                }
+            }
             state.sudp_routes.lock().await.remove(proxy_name);
             state
                 .sudp_sessions
@@ -3721,6 +3822,7 @@ mod tests {
             xtcp_routes: Arc::new(Mutex::new(HashMap::new())),
             xtcp_groups: Arc::new(Mutex::new(HashMap::new())),
             sudp_routes: Arc::new(Mutex::new(HashMap::new())),
+            sudp_groups: Arc::new(Mutex::new(HashMap::new())),
             sudp_sessions: Arc::new(Mutex::new(HashMap::new())),
             tcp_groups: Arc::new(Mutex::new(HashMap::new())),
             udp_groups: Arc::new(Mutex::new(HashMap::new())),
@@ -3809,6 +3911,116 @@ mod tests {
             }
             other => panic!("unexpected owner notification: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn sudp_group_routes_visitor_packets_round_robin() {
+        let (owner_a, mut owner_a_stream) = test_control_with_run_id("owner-a", 0);
+        let (owner_b, mut owner_b_stream) = test_control_with_run_id("owner-b", 0);
+        let (visitor_control, _visitor_stream) = test_control_with_run_id("visitor-run", 0);
+        let state = test_server_state(vec![
+            owner_a.clone(),
+            owner_b.clone(),
+            visitor_control.clone(),
+        ]);
+
+        let remote_a = start_sudp_proxy(
+            state.clone(),
+            owner_a,
+            "sudp-a".to_string(),
+            Some("sudp-group".to_string()),
+            Some("group-secret".to_string()),
+            Some("private".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+        let remote_b = start_sudp_proxy(
+            state.clone(),
+            owner_b,
+            "sudp-b".to_string(),
+            Some("sudp-group".to_string()),
+            Some("group-secret".to_string()),
+            Some("private".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(remote_a, "sudp://sudp-group");
+        assert_eq!(remote_b, "sudp://sudp-group");
+
+        let (owner_c, _) = test_control_with_run_id("owner-c", 0);
+        let mismatch = start_sudp_proxy(
+            state.clone(),
+            owner_c,
+            "sudp-c".to_string(),
+            Some("sudp-group".to_string()),
+            Some("other-secret".to_string()),
+            Some("private".to_string()),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(mismatch.to_string().contains("groupKey mismatch"));
+
+        for payload in [b"alpha".to_vec(), b"beta".to_vec()] {
+            handle_sudp_packet(
+                state.clone(),
+                visitor_control.clone(),
+                "sudp-group".to_string(),
+                "session-1".to_string(),
+                payload,
+                Some("private".to_string()),
+                true,
+            )
+            .await
+            .unwrap();
+        }
+
+        match time::timeout(Duration::from_secs(1), read_msg(&mut owner_a_stream))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Message::SudpPacket {
+                proxy_name,
+                session_id,
+                content,
+                from_visitor,
+                ..
+            } => {
+                assert_eq!(proxy_name, "sudp-a");
+                assert_eq!(session_id, "session-1");
+                assert_eq!(content, b"alpha");
+                assert!(from_visitor);
+            }
+            other => panic!("unexpected owner-a message: {other:?}"),
+        }
+
+        match time::timeout(Duration::from_secs(1), read_msg(&mut owner_b_stream))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Message::SudpPacket {
+                proxy_name,
+                session_id,
+                content,
+                from_visitor,
+                ..
+            } => {
+                assert_eq!(proxy_name, "sudp-b");
+                assert_eq!(session_id, "session-1");
+                assert_eq!(content, b"beta");
+                assert!(from_visitor);
+            }
+            other => panic!("unexpected owner-b message: {other:?}"),
+        }
+
+        let groups = tcp_group_list_json(&state).await.unwrap().to_string();
+        assert!(groups.contains("\"protocol\":\"sudp\""));
+        assert!(groups.contains("\"group\":\"sudp-group\""));
+        assert!(groups.contains("\"member_count\":2"));
     }
 
     #[tokio::test]

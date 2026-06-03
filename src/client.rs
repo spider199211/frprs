@@ -486,24 +486,21 @@ async fn punch_sudp_owner_candidates(
     transaction_id: &str,
     resp: &NatHoleResponse,
 ) -> Result<()> {
-    let Some(proxy) = state.proxies.get(proxy_name) else {
+    let Some(proxy) = sudp_direct_owner_proxy(state, proxy_name) else {
         return Ok(());
     };
-    if proxy.proxy_type != ProxyType::Sudp {
-        return Ok(());
-    }
     let Some(socket) = state
         .sudp_direct_owner_sockets
         .lock()
         .await
-        .get(proxy_name)
+        .get(&proxy.name)
         .cloned()
     else {
         return Ok(());
     };
     let frame = DirectSudpFrame {
         magic: DIRECT_SUDP_MAGIC.to_string(),
-        proxy_name: proxy.name.clone(),
+        proxy_name: proxy_name.to_string(),
         session_id: transaction_id.to_string(),
         content: Vec::new(),
         sk: None,
@@ -522,6 +519,24 @@ async fn punch_sudp_owner_candidates(
         }
     }
     Ok(())
+}
+
+fn sudp_direct_owner_proxy(state: &ClientState, name_or_group: &str) -> Option<ProxyConfig> {
+    state
+        .proxies
+        .get(name_or_group)
+        .filter(|proxy| proxy.proxy_type == ProxyType::Sudp)
+        .cloned()
+        .or_else(|| {
+            state
+                .proxies
+                .values()
+                .find(|proxy| {
+                    proxy.proxy_type == ProxyType::Sudp
+                        && proxy.group.as_deref() == Some(name_or_group)
+                })
+                .cloned()
+        })
 }
 
 async fn announce_nat_hole(
@@ -994,6 +1009,16 @@ async fn start_sudp_direct_owner_listener(state: ClientState, proxy: ProxyConfig
         vec![advertised_addr.clone()],
     )
     .await?;
+    if let Some(group_name) = proxy.group.as_deref().filter(|group| !group.is_empty()) {
+        announce_nat_hole(
+            &state,
+            group_name,
+            group_name,
+            "server",
+            vec![advertised_addr.clone()],
+        )
+        .await?;
+    }
     info!(
         "sudp direct owner {} listening on {}",
         proxy.name, advertised_addr
@@ -1018,7 +1043,9 @@ async fn start_sudp_direct_owner_listener(state: ClientState, proxy: ProxyConfig
                 Some(frame) if frame.from_visitor && !frame.ack => frame,
                 _ => continue,
             };
-            if frame.proxy_name != proxy.name {
+            if frame.proxy_name != proxy.name
+                && proxy.group.as_deref() != Some(frame.proxy_name.as_str())
+            {
                 debug!(
                     "ignore sudp direct frame for {} on owner {}",
                     frame.proxy_name, proxy.name
@@ -1035,7 +1062,7 @@ async fn start_sudp_direct_owner_listener(state: ClientState, proxy: ProxyConfig
 
             let ack = DirectSudpFrame {
                 magic: DIRECT_SUDP_MAGIC.to_string(),
-                proxy_name: proxy.name.clone(),
+                proxy_name: frame.proxy_name.clone(),
                 session_id: frame.session_id.clone(),
                 content: Vec::new(),
                 sk: None,
@@ -2270,6 +2297,64 @@ mod tests {
         let frame = parse_sudp_direct_frame(&buf[..n]).unwrap();
         assert_eq!(frame.proxy_name, "sudp-echo");
         assert_eq!(frame.session_id, "sudp-echo");
+        assert!(frame.ack);
+        assert!(frame.probe);
+        assert!(!frame.from_visitor);
+    }
+
+    #[tokio::test]
+    async fn sudp_group_owner_punches_candidates_from_async_nat_notification() {
+        let (mut state, _server) = test_state();
+        let proxy = ProxyConfig {
+            name: "sudp-echo-a".to_string(),
+            proxy_type: ProxyType::Sudp,
+            local_ip: "127.0.0.1".to_string(),
+            local_port: 7001,
+            remote_port: 0,
+            group: Some("sudp-echo-group".to_string()),
+            group_key: Some("group-secret".to_string()),
+            custom_domains: Vec::new(),
+            locations: Vec::new(),
+            host_header_rewrite: None,
+            request_headers: Default::default(),
+            http_user: None,
+            http_password: None,
+            bandwidth_limit: None,
+            sk: Some("secret".to_string()),
+            health_check: None,
+        };
+        state.proxies = Arc::new(HashMap::from([(proxy.name.clone(), proxy)]));
+        let owner_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        state
+            .sudp_direct_owner_sockets
+            .lock()
+            .await
+            .insert("sudp-echo-a".to_string(), owner_socket);
+        let visitor_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let visitor_addr = visitor_socket.local_addr().unwrap().to_string();
+
+        handle_nat_hole_response(
+            &state,
+            "sudp-echo-group".to_string(),
+            "sudp-echo-group".to_string(),
+            "server".to_string(),
+            NatHoleResponse {
+                peer_observed_addr: String::new(),
+                peer_local_addrs: vec![visitor_addr],
+                waiting: false,
+                error: String::new(),
+            },
+        )
+        .await;
+
+        let mut buf = vec![0_u8; 1024];
+        let (n, _) = time::timeout(Duration::from_secs(1), visitor_socket.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        let frame = parse_sudp_direct_frame(&buf[..n]).unwrap();
+        assert_eq!(frame.proxy_name, "sudp-echo-group");
+        assert_eq!(frame.session_id, "sudp-echo-group");
         assert!(frame.ack);
         assert!(frame.probe);
         assert!(!frame.from_visitor);
