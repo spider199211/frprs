@@ -3782,6 +3782,121 @@ async fn sudp_group_visitor_forwards_packets_directly_when_peer_reachable() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sudp_visitor_waits_for_delayed_owner_nat_notification() {
+    let _guard = acquire_test_lock().await;
+    let udp_echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let udp_echo_port = udp_echo.local_addr().unwrap().port();
+    let echo_task = tokio::spawn(async move {
+        let mut buf = [0_u8; 1024];
+        loop {
+            let (n, peer) = udp_echo.recv_from(&mut buf).await.unwrap();
+            udp_echo.send_to(&buf[..n], peer).await.unwrap();
+        }
+    });
+
+    let bind_port = unused_port();
+    let visitor_port = unused_port();
+    let dashboard_port = unused_port();
+    let server_cfg = ServerConfig {
+        bind_addr: "127.0.0.1".to_string(),
+        bind_port,
+        proxy_bind_addr: "127.0.0.1".to_string(),
+        vhost_http_port: 0,
+        vhost_https_port: 0,
+        dashboard_addr: "127.0.0.1".to_string(),
+        dashboard_port,
+        allow_ports: Vec::new(),
+        auth: AuthConfig {
+            token: Some("secret".to_string()),
+        },
+        plugins: ServerPluginConfig::default(),
+        transport: TransportConfig::default(),
+    };
+    let server_task = tokio::spawn(server::run(server_cfg));
+    sleep(Duration::from_millis(100)).await;
+
+    let visitor_cfg = ClientConfig {
+        server_addr: "127.0.0.1".to_string(),
+        server_port: bind_port,
+        auth: AuthConfig {
+            token: Some("secret".to_string()),
+        },
+        pool_count: 0,
+        transport: TransportConfig::default(),
+        plugins: Default::default(),
+        proxies: Vec::new(),
+        visitors: vec![VisitorConfig {
+            name: "local-delayed-sudp".to_string(),
+            visitor_type: ProxyType::Sudp,
+            server_name: "delayed-sudp".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: visitor_port,
+            sk: Some("private".to_string()),
+        }],
+    };
+    let visitor_task = tokio::spawn(client::run(visitor_cfg));
+    sleep(Duration::from_millis(150)).await;
+
+    let user = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    user.send_to(b"hello delayed sudp", format!("127.0.0.1:{visitor_port}"))
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(120)).await;
+    let owner_cfg = ClientConfig {
+        server_addr: "127.0.0.1".to_string(),
+        server_port: bind_port,
+        auth: AuthConfig {
+            token: Some("secret".to_string()),
+        },
+        pool_count: 0,
+        transport: TransportConfig::default(),
+        plugins: Default::default(),
+        proxies: vec![ProxyConfig {
+            name: "delayed-sudp".to_string(),
+            proxy_type: ProxyType::Sudp,
+            local_ip: "127.0.0.1".to_string(),
+            local_port: udp_echo_port,
+            remote_port: 0,
+            group: None,
+            group_key: None,
+            custom_domains: Vec::new(),
+            locations: Vec::new(),
+            host_header_rewrite: None,
+            request_headers: Default::default(),
+            http_user: None,
+            http_password: None,
+            bandwidth_limit: None,
+            sk: Some("private".to_string()),
+            health_check: None,
+        }],
+        visitors: Vec::new(),
+    };
+    let owner_task = tokio::spawn(client::run(owner_cfg));
+
+    let mut buf = [0_u8; 1024];
+    let (n, _) = tokio::time::timeout(Duration::from_secs(5), user.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&buf[..n], b"hello delayed sudp");
+    sleep(Duration::from_millis(400)).await;
+
+    let metrics = http_request(
+        format!("127.0.0.1:{dashboard_port}"),
+        b"GET /api/metrics HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )
+    .await;
+    assert!(metrics.contains("\"bytes_up_total\":0"));
+    assert!(metrics.contains("\"bytes_down_total\":0"));
+
+    owner_task.abort();
+    visitor_task.abort();
+    server_task.abort();
+    echo_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn health_check_closes_unhealthy_tcp_proxy() {
     let _guard = acquire_test_lock().await;
     let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();

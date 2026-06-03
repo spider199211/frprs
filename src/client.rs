@@ -1274,12 +1274,13 @@ async fn try_sudp_direct_visitor(
         .local_addr()
         .map(|addr| addr.to_string())
         .unwrap_or_default();
-    let resp = match request_nat_hole(
+    let resp = match request_nat_hole_with_grace(
         state,
         &visitor.server_name,
         &visitor.server_name,
         "visitor",
         vec![local_addr],
+        Duration::from_millis(500),
     )
     .await
     {
