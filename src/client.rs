@@ -14,7 +14,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt, WriteHalf},
@@ -25,6 +25,7 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 
 const DIRECT_SUDP_MAGIC: &str = "frprs-sudp-direct-v1";
+const NAT_HOLE_CACHED_RESPONSE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 struct ClientState {
@@ -40,7 +41,7 @@ struct ClientState {
     sudp_direct_confirmed: Arc<Mutex<HashSet<String>>>,
     sudp_direct_probe_sessions: Arc<Mutex<HashSet<String>>>,
     nat_hole_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<NatHoleResponse>>>>,
-    nat_hole_cached: Arc<Mutex<HashMap<String, NatHoleResponse>>>,
+    nat_hole_cached: Arc<Mutex<HashMap<String, NatHoleCachedResponse>>>,
     writer: Arc<Mutex<WriteHalf<BoxStream>>>,
     quic_session: Option<Arc<transports::quic::QuicClientSession>>,
 }
@@ -57,6 +58,12 @@ struct NatHoleResponse {
     peer_local_addrs: Vec<String>,
     waiting: bool,
     error: String,
+}
+
+#[derive(Clone)]
+struct NatHoleCachedResponse {
+    resp: NatHoleResponse,
+    cached_at: Instant,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -458,7 +465,19 @@ async fn handle_nat_hole_response(
             debug!("sudp owner punch for {proxy_name}/{transaction_id} failed: {err:#}");
         }
     }
-    state.nat_hole_cached.lock().await.insert(key, resp);
+    state.nat_hole_cached.lock().await.insert(
+        key,
+        NatHoleCachedResponse {
+            resp,
+            cached_at: Instant::now(),
+        },
+    );
+}
+
+async fn take_cached_nat_hole_response(state: &ClientState, key: &str) -> Option<NatHoleResponse> {
+    let mut cached = state.nat_hole_cached.lock().await;
+    let cached_resp = cached.remove(key)?;
+    (cached_resp.cached_at.elapsed() <= NAT_HOLE_CACHED_RESPONSE_TTL).then_some(cached_resp.resp)
 }
 
 async fn request_nat_hole(
@@ -469,7 +488,7 @@ async fn request_nat_hole(
     local_addrs: Vec<String>,
 ) -> Result<NatHoleResponse> {
     let key = nat_hole_waiter_key(transaction_id, role);
-    if let Some(resp) = state.nat_hole_cached.lock().await.remove(&key) {
+    if let Some(resp) = take_cached_nat_hole_response(state, &key).await {
         if !resp.error.is_empty() {
             bail!("nat hole register failed: {}", resp.error);
         }
@@ -518,7 +537,7 @@ async fn request_nat_hole_with_grace(
     }
 
     let key = nat_hole_waiter_key(transaction_id, role);
-    if let Some(resp) = state.nat_hole_cached.lock().await.remove(&key) {
+    if let Some(resp) = take_cached_nat_hole_response(state, &key).await {
         if !resp.error.is_empty() {
             bail!("nat hole register failed: {}", resp.error);
         }
@@ -2314,8 +2333,8 @@ mod tests {
             .await
             .remove(&nat_hole_waiter_key("tx-cache", "server"))
             .unwrap();
-        assert_eq!(cached.peer_observed_addr, "127.0.0.1:7002");
-        assert_eq!(cached.peer_local_addrs, vec!["10.0.0.20:10002"]);
+        assert_eq!(cached.resp.peer_observed_addr, "127.0.0.1:7002");
+        assert_eq!(cached.resp.peer_local_addrs, vec!["10.0.0.20:10002"]);
     }
 
     #[tokio::test]
@@ -2323,11 +2342,14 @@ mod tests {
         let (state, _server) = test_state();
         state.nat_hole_cached.lock().await.insert(
             nat_hole_waiter_key("tx-cache", "visitor"),
-            NatHoleResponse {
-                peer_observed_addr: "127.0.0.1:7001".to_string(),
-                peer_local_addrs: vec!["10.0.0.10:10001".to_string()],
-                waiting: false,
-                error: String::new(),
+            NatHoleCachedResponse {
+                resp: NatHoleResponse {
+                    peer_observed_addr: "127.0.0.1:7001".to_string(),
+                    peer_local_addrs: vec!["10.0.0.10:10001".to_string()],
+                    waiting: false,
+                    error: String::new(),
+                },
+                cached_at: Instant::now(),
             },
         );
 
@@ -2348,6 +2370,72 @@ mod tests {
             .lock()
             .await
             .contains_key(&nat_hole_waiter_key("tx-cache", "visitor")));
+    }
+
+    #[tokio::test]
+    async fn request_nat_hole_ignores_expired_cached_response() {
+        let (state, mut server) = test_state();
+        state.nat_hole_cached.lock().await.insert(
+            nat_hole_waiter_key("tx-stale", "visitor"),
+            NatHoleCachedResponse {
+                resp: NatHoleResponse {
+                    peer_observed_addr: "127.0.0.1:7001".to_string(),
+                    peer_local_addrs: vec!["10.0.0.10:10001".to_string()],
+                    waiting: false,
+                    error: String::new(),
+                },
+                cached_at: Instant::now() - NAT_HOLE_CACHED_RESPONSE_TTL - Duration::from_secs(1),
+            },
+        );
+
+        let request_state = state.clone();
+        let request = tokio::spawn(async move {
+            request_nat_hole(
+                &request_state,
+                "tx-stale",
+                "xtcp-ssh",
+                "visitor",
+                vec!["10.0.0.20:10002".to_string()],
+            )
+            .await
+        });
+
+        match time::timeout(Duration::from_secs(1), read_msg(&mut server))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Message::NatHoleRegister {
+                transaction_id,
+                proxy_name,
+                role,
+                local_addrs,
+            } => {
+                assert_eq!(transaction_id, "tx-stale");
+                assert_eq!(proxy_name, "xtcp-ssh");
+                assert_eq!(role, "visitor");
+                assert_eq!(local_addrs, vec!["10.0.0.20:10002"]);
+            }
+            other => panic!("unexpected nat hole register: {other:?}"),
+        }
+
+        handle_nat_hole_response(
+            &state,
+            "tx-stale".to_string(),
+            "xtcp-ssh".to_string(),
+            "visitor".to_string(),
+            NatHoleResponse {
+                peer_observed_addr: "127.0.0.1:7003".to_string(),
+                peer_local_addrs: vec!["10.0.0.30:10003".to_string()],
+                waiting: false,
+                error: String::new(),
+            },
+        )
+        .await;
+
+        let resp = request.await.unwrap().unwrap();
+        assert_eq!(resp.peer_observed_addr, "127.0.0.1:7003");
+        assert_eq!(resp.peer_local_addrs, vec!["10.0.0.30:10003"]);
     }
 
     #[tokio::test]
