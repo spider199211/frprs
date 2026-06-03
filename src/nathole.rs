@@ -58,10 +58,16 @@ pub struct NatHoleController {
 #[derive(Debug)]
 struct NatHoleSession {
     proxy_name: String,
-    servers: Vec<NatHolePeer>,
-    visitors: Vec<NatHolePeer>,
+    servers: Vec<NatHolePeerEntry>,
+    visitors: Vec<NatHolePeerEntry>,
     next_server: usize,
     next_visitor: usize,
+    updated_at: Instant,
+}
+
+#[derive(Debug)]
+struct NatHolePeerEntry {
+    peer: NatHolePeer,
     updated_at: Instant,
 }
 
@@ -109,11 +115,12 @@ impl NatHoleController {
             );
         }
 
+        let now = Instant::now();
         match peer.role {
-            NatHoleRole::Server => Self::upsert_peer(&mut session.servers, peer.clone()),
-            NatHoleRole::Visitor => Self::upsert_peer(&mut session.visitors, peer.clone()),
+            NatHoleRole::Server => Self::upsert_peer(&mut session.servers, peer.clone(), now),
+            NatHoleRole::Visitor => Self::upsert_peer(&mut session.visitors, peer.clone(), now),
         }
-        session.updated_at = Instant::now();
+        session.updated_at = now;
 
         Ok(
             Self::candidate_from_session(session, peer.role, Some(&peer.run_id))
@@ -142,14 +149,18 @@ impl NatHoleController {
             .is_some()
     }
 
-    fn upsert_peer(peers: &mut Vec<NatHolePeer>, peer: NatHolePeer) {
+    fn upsert_peer(peers: &mut Vec<NatHolePeerEntry>, peer: NatHolePeer, now: Instant) {
         if let Some(existing) = peers
             .iter_mut()
-            .find(|existing| existing.run_id == peer.run_id)
+            .find(|existing| existing.peer.run_id == peer.run_id)
         {
-            *existing = peer;
+            existing.peer = peer;
+            existing.updated_at = now;
         } else {
-            peers.push(peer);
+            peers.push(NatHolePeerEntry {
+                peer,
+                updated_at: now,
+            });
         }
     }
 
@@ -170,7 +181,7 @@ impl NatHoleController {
         for _ in 0..peers.len() {
             let index = *next % peers.len();
             *next = (*next).wrapping_add(1);
-            let peer = &peers[index];
+            let peer = &peers[index].peer;
             if current_run_id
                 .map(|run_id| run_id != peer.run_id)
                 .unwrap_or(true)
@@ -193,13 +204,26 @@ impl NatHoleController {
 
     fn cleanup_locked(sessions: &mut HashMap<String, NatHoleSession>, ttl: Duration) {
         let now = Instant::now();
-        sessions.retain(|_, session| now.duration_since(session.updated_at) <= ttl);
+        sessions.retain(|_, session| {
+            session
+                .servers
+                .retain(|peer| now.duration_since(peer.updated_at) <= ttl);
+            session
+                .visitors
+                .retain(|peer| now.duration_since(peer.updated_at) <= ttl);
+            session.next_server = session.next_server.min(session.servers.len());
+            session.next_visitor = session.next_visitor.min(session.visitors.len());
+            !session.servers.is_empty()
+                || !session.visitors.is_empty()
+                || now.duration_since(session.updated_at) <= ttl
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
 
     fn addr(port: u16) -> SocketAddr {
         format!("127.0.0.1:{port}").parse().unwrap()
@@ -370,5 +394,63 @@ mod tests {
             }
             other => panic!("unexpected outcomes: {other:?}"),
         }
+    }
+
+    #[test]
+    fn prunes_stale_peers_inside_active_shared_transaction() {
+        let controller = NatHoleController::new(Duration::from_millis(200));
+
+        assert_eq!(
+            controller
+                .register(NatHolePeer {
+                    transaction_id: "tx-group".to_string(),
+                    proxy_name: "xtcp-group".to_string(),
+                    run_id: "owner-stale".to_string(),
+                    role: NatHoleRole::Server,
+                    observed_addr: addr(7001),
+                    local_addrs: vec![addr(10001)],
+                })
+                .unwrap(),
+            NatHoleOutcome::Waiting
+        );
+
+        thread::sleep(Duration::from_millis(90));
+
+        assert_eq!(
+            controller
+                .register(NatHolePeer {
+                    transaction_id: "tx-group".to_string(),
+                    proxy_name: "xtcp-group".to_string(),
+                    run_id: "owner-fresh".to_string(),
+                    role: NatHoleRole::Server,
+                    observed_addr: addr(7002),
+                    local_addrs: vec![addr(10002)],
+                })
+                .unwrap(),
+            NatHoleOutcome::Waiting
+        );
+
+        thread::sleep(Duration::from_millis(130));
+
+        assert_eq!(
+            controller
+                .register(NatHolePeer {
+                    transaction_id: "tx-group".to_string(),
+                    proxy_name: "xtcp-group".to_string(),
+                    run_id: "visitor".to_string(),
+                    role: NatHoleRole::Visitor,
+                    observed_addr: addr(8001),
+                    local_addrs: vec![addr(9001)],
+                })
+                .unwrap(),
+            NatHoleOutcome::Matched(NatHoleCandidate {
+                transaction_id: "tx-group".to_string(),
+                proxy_name: "xtcp-group".to_string(),
+                peer_run_id: "owner-fresh".to_string(),
+                peer_role: NatHoleRole::Server,
+                observed_addr: addr(7002),
+                local_addrs: vec![addr(10002)],
+            })
+        );
     }
 }
