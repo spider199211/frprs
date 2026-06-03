@@ -550,16 +550,54 @@ async fn punch_sudp_owner_candidates(
         probe: true,
     };
     let payload = serde_json::to_vec(&frame).context("encode sudp owner punch probe")?;
+    let mut candidates = Vec::new();
     for candidate in direct_candidates(resp) {
         let Ok(addr) = candidate.parse::<SocketAddr>() else {
             debug!("ignore invalid sudp owner punch candidate {candidate}");
             continue;
         };
-        if let Err(err) = socket.send_to(&payload, addr).await {
-            debug!("sudp owner punch to {candidate} failed: {err:#}");
+        candidates.push(addr);
+    }
+    send_sudp_owner_punch_payload(&socket, &payload, &candidates).await;
+    schedule_sudp_owner_punch_retries(proxy_name.to_string(), socket, payload, candidates);
+    Ok(())
+}
+
+async fn send_sudp_owner_punch_payload(
+    socket: &UdpSocket,
+    payload: &[u8],
+    candidates: &[SocketAddr],
+) {
+    for addr in candidates {
+        if let Err(err) = socket.send_to(payload, addr).await {
+            debug!("sudp owner punch to {addr} failed: {err:#}");
         }
     }
-    Ok(())
+}
+
+fn schedule_sudp_owner_punch_retries(
+    proxy_name: String,
+    socket: Arc<UdpSocket>,
+    payload: Vec<u8>,
+    candidates: Vec<SocketAddr>,
+) {
+    if candidates.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        for delay in [
+            Duration::from_millis(120),
+            Duration::from_millis(260),
+            Duration::from_millis(520),
+        ] {
+            time::sleep(delay).await;
+            send_sudp_owner_punch_payload(&socket, &payload, &candidates).await;
+            debug!(
+                "sudp owner {proxy_name} retried punch to {} candidates",
+                candidates.len()
+            );
+        }
+    });
 }
 
 fn sudp_direct_owner_proxy(state: &ClientState, name_or_group: &str) -> Option<ProxyConfig> {
@@ -2414,6 +2452,17 @@ mod tests {
         assert!(frame.ack);
         assert!(frame.probe);
         assert!(!frame.from_visitor);
+
+        let (n, _) = time::timeout(Duration::from_secs(1), visitor_socket.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        let retry_frame = parse_sudp_direct_frame(&buf[..n]).unwrap();
+        assert_eq!(retry_frame.proxy_name, "sudp-echo");
+        assert_eq!(retry_frame.session_id, "sudp-echo");
+        assert!(retry_frame.ack);
+        assert!(retry_frame.probe);
+        assert!(!retry_frame.from_visitor);
     }
 
     #[tokio::test]
