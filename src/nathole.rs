@@ -149,6 +149,21 @@ impl NatHoleController {
             .is_some()
     }
 
+    pub fn remove_run_id(&self, run_id: &str) -> usize {
+        let mut sessions = self.sessions.lock().expect("nathole mutex poisoned");
+        let mut removed = 0;
+
+        sessions.retain(|_, session| {
+            removed += Self::remove_peers_by_run_id(&mut session.servers, run_id);
+            removed += Self::remove_peers_by_run_id(&mut session.visitors, run_id);
+            session.next_server = session.next_server.min(session.servers.len());
+            session.next_visitor = session.next_visitor.min(session.visitors.len());
+            !session.servers.is_empty() || !session.visitors.is_empty()
+        });
+
+        removed
+    }
+
     fn upsert_peer(peers: &mut Vec<NatHolePeerEntry>, peer: NatHolePeer, now: Instant) {
         if let Some(existing) = peers
             .iter_mut()
@@ -162,6 +177,12 @@ impl NatHoleController {
                 updated_at: now,
             });
         }
+    }
+
+    fn remove_peers_by_run_id(peers: &mut Vec<NatHolePeerEntry>, run_id: &str) -> usize {
+        let before = peers.len();
+        peers.retain(|peer| peer.peer.run_id != run_id);
+        before - peers.len()
     }
 
     fn candidate_from_session(
@@ -452,5 +473,44 @@ mod tests {
                 local_addrs: vec![addr(10002)],
             })
         );
+    }
+
+    #[test]
+    fn remove_run_id_prunes_matching_peers_and_empty_sessions() {
+        let controller = NatHoleController::default();
+
+        for (tx, run_id, role, port) in [
+            ("tx-shared", "owner-gone", NatHoleRole::Server, 7001),
+            ("tx-shared", "owner-live", NatHoleRole::Server, 7002),
+            ("tx-shared", "visitor-gone", NatHoleRole::Visitor, 8001),
+            ("tx-empty", "owner-gone", NatHoleRole::Server, 7003),
+        ] {
+            controller
+                .register(NatHolePeer {
+                    transaction_id: tx.to_string(),
+                    proxy_name: "xtcp-group".to_string(),
+                    run_id: run_id.to_string(),
+                    role,
+                    observed_addr: addr(port),
+                    local_addrs: vec![addr(port + 1000)],
+                })
+                .unwrap();
+        }
+
+        assert_eq!(controller.remove_run_id("owner-gone"), 2);
+
+        let candidate = controller
+            .candidate_for("tx-shared", NatHoleRole::Visitor)
+            .expect("remaining visitor should still see live owner");
+        assert_eq!(candidate.peer_run_id, "owner-live");
+        assert!(controller
+            .candidate_for("tx-empty", NatHoleRole::Visitor)
+            .is_none());
+
+        assert_eq!(controller.remove_run_id("visitor-gone"), 1);
+        assert!(controller
+            .candidate_for("tx-shared", NatHoleRole::Server)
+            .is_none());
+        assert_eq!(controller.remove_run_id("missing"), 0);
     }
 }

@@ -39,7 +39,7 @@ This is a Rust rewrite scaffold for `fatedier/frp`.
 - STCP/XTCP 私有 visitor 协议，支持 `sk` 密钥校验和本地 visitor 监听；XTCP 可在 peer 可达时直连，失败时回退服务端中继
 - STCP/XTCP `group`/`groupKey` 私有服务分组负载均衡，visitor 可通过分组名轮询访问后端
 - SUDP 私有 visitor 协议，支持 `sk` 密钥校验、`group`/`groupKey` 分组负载均衡、peer 可达时按代理名或分组名直连 UDP 转发、probe 选路、短时 probe 重试、带 TTL 的直连 peer 确认、owner 响应 peer 刷新和服务端中继 fallback
-- NAT 打洞控制器、同一事务多 peer 候选保留与按 peer 过期清理、控制通道候选地址交换、双端匹配通知、客户端带 TTL 的异步通知缓存、XTCP/SUDP owner 候选周期刷新、XTCP/SUDP waiting 后短暂等待异步匹配、XTCP/SUDP 分组直连注册、SUDP owner 主动 punch 短时重试、候选优选、XTCP 候选竞速、SUDP 候选探测和重试
+- NAT 打洞控制器、同一事务多 peer 候选保留、按 peer 过期清理与客户端断线主动剪枝、控制通道候选地址交换、双端匹配通知、客户端带 TTL 的异步通知缓存、XTCP/SUDP owner 候选周期刷新、XTCP/SUDP waiting 后短暂等待异步匹配、XTCP/SUDP 分组直连注册、SUDP owner 主动 punch 短时重试、候选优选、XTCP 候选竞速、SUDP 候选探测和重试
 - 通过 `transport.protocol` 支持 TCP、TLS、WebSocket、QUIC、KCP 控制/工作连接传输
 - 按 visitor 请求 work connection
 - 双向 TCP 字节转发

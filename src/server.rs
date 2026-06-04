@@ -719,6 +719,10 @@ async fn register_control(
             Err(err) => {
                 info!("control {run_id} disconnected: {err:#}");
                 state.controls.lock().await.remove(&run_id);
+                let removed_nat_peers = state.nathole.remove_run_id(&run_id);
+                if removed_nat_peers > 0 {
+                    debug!("removed {removed_nat_peers} nat hole peers for run_id {run_id}");
+                }
                 close_proxies_for_run_id(state.clone(), &run_id).await?;
                 return Ok(());
             }
