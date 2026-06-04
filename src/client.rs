@@ -27,6 +27,7 @@ use tracing::{debug, error, info, warn};
 const DIRECT_SUDP_MAGIC: &str = "frprs-sudp-direct-v1";
 const NAT_HOLE_CACHED_RESPONSE_TTL: Duration = Duration::from_secs(30);
 const NAT_HOLE_OWNER_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+const XTCP_DIRECT_FAILURE_TTL: Duration = Duration::from_secs(5);
 const SUDP_DIRECT_PEER_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
@@ -44,6 +45,7 @@ struct ClientState {
     sudp_direct_probe_sessions: Arc<Mutex<HashSet<String>>>,
     nat_hole_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<NatHoleResponse>>>>,
     nat_hole_cached: Arc<Mutex<HashMap<String, NatHoleCachedResponse>>>,
+    xtcp_direct_failures: Arc<Mutex<HashMap<String, Instant>>>,
     writer: Arc<Mutex<WriteHalf<BoxStream>>>,
     quic_session: Option<Arc<transports::quic::QuicClientSession>>,
 }
@@ -210,6 +212,7 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
         sudp_direct_probe_sessions: Arc::new(Mutex::new(HashSet::new())),
         nat_hole_waiters: Arc::new(Mutex::new(HashMap::new())),
         nat_hole_cached: Arc::new(Mutex::new(HashMap::new())),
+        xtcp_direct_failures: Arc::new(Mutex::new(HashMap::new())),
         writer: Arc::new(Mutex::new(writer)),
         quic_session,
     };
@@ -948,6 +951,14 @@ async fn try_xtcp_direct_visitor(
     visitor: &VisitorConfig,
     inbound: &mut TcpStream,
 ) -> Result<bool> {
+    if should_skip_xtcp_direct(state, &visitor.server_name).await {
+        debug!(
+            "skip xtcp direct lookup for {} after recent candidate failure",
+            visitor.server_name
+        );
+        return Ok(false);
+    }
+
     let resp = match request_nat_hole_with_grace(
         state,
         &visitor.server_name,
@@ -972,9 +983,11 @@ async fn try_xtcp_direct_visitor(
         return Ok(false);
     }
 
+    let candidates = direct_candidates(&resp);
     if let Some((mut peer, candidate)) =
-        connect_xtcp_direct_peer(visitor, direct_candidates(&resp)).await?
+        connect_xtcp_direct_peer(visitor, candidates.clone()).await?
     {
+        clear_xtcp_direct_failure(state, &visitor.server_name).await;
         info!(
             "xtcp visitor {} connected directly to {}",
             visitor.name, candidate
@@ -985,7 +998,35 @@ async fn try_xtcp_direct_visitor(
         return Ok(true);
     }
 
+    if !candidates.is_empty() {
+        mark_xtcp_direct_failure(state, &visitor.server_name).await;
+    }
+
     Ok(false)
+}
+
+async fn should_skip_xtcp_direct(state: &ClientState, server_name: &str) -> bool {
+    let mut failures = state.xtcp_direct_failures.lock().await;
+    let Some(failed_at) = failures.get(server_name).copied() else {
+        return false;
+    };
+    if failed_at.elapsed() <= XTCP_DIRECT_FAILURE_TTL {
+        return true;
+    }
+    failures.remove(server_name);
+    false
+}
+
+async fn mark_xtcp_direct_failure(state: &ClientState, server_name: &str) {
+    state
+        .xtcp_direct_failures
+        .lock()
+        .await
+        .insert(server_name.to_string(), Instant::now());
+}
+
+async fn clear_xtcp_direct_failure(state: &ClientState, server_name: &str) {
+    state.xtcp_direct_failures.lock().await.remove(server_name);
 }
 
 async fn connect_xtcp_direct_peer(
@@ -2361,6 +2402,7 @@ mod tests {
             sudp_direct_probe_sessions: Arc::new(Mutex::new(HashSet::new())),
             nat_hole_waiters: Arc::new(Mutex::new(HashMap::new())),
             nat_hole_cached: Arc::new(Mutex::new(HashMap::new())),
+            xtcp_direct_failures: Arc::new(Mutex::new(HashMap::new())),
             writer: Arc::new(Mutex::new(writer)),
             quic_session: None,
         };
@@ -2389,6 +2431,37 @@ mod tests {
             }
         });
         (addr, task)
+    }
+
+    async fn spawn_rejecting_xtcp_direct_test_peer() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            match read_msg(&mut stream).await.unwrap() {
+                Message::NewVisitorConn { proxy_name, .. } => {
+                    write_msg(
+                        &mut stream,
+                        &Message::NewVisitorConnResp {
+                            proxy_name,
+                            error: "direct peer unavailable".to_string(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+                other => panic!("unexpected direct handshake: {other:?}"),
+            }
+        });
+        (addr, task)
+    }
+
+    async fn tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(TcpStream::connect(addr));
+        let (server, _) = listener.accept().await.unwrap();
+        (client.await.unwrap().unwrap(), server)
     }
 
     #[tokio::test]
@@ -2970,6 +3043,67 @@ mod tests {
         );
         slow_task.abort();
         fast_task.abort();
+    }
+
+    #[tokio::test]
+    async fn xtcp_direct_failure_marks_recent_skip_cache() {
+        let (state, _server) = test_state();
+        let (bad_addr, bad_task) = spawn_rejecting_xtcp_direct_test_peer().await;
+        state.nat_hole_cached.lock().await.insert(
+            nat_hole_waiter_key("bad-xtcp", "visitor"),
+            NatHoleCachedResponse {
+                resp: NatHoleResponse {
+                    peer_observed_addr: String::new(),
+                    peer_local_addrs: vec![bad_addr],
+                    waiting: false,
+                    error: String::new(),
+                },
+                cached_at: Instant::now(),
+            },
+        );
+        let visitor = VisitorConfig {
+            name: "local-bad-xtcp".to_string(),
+            visitor_type: ProxyType::Xtcp,
+            server_name: "bad-xtcp".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+        let (_client, mut inbound) = tcp_pair().await;
+
+        let used_direct = try_xtcp_direct_visitor(&state, &visitor, &mut inbound)
+            .await
+            .unwrap();
+
+        assert!(!used_direct);
+        assert!(should_skip_xtcp_direct(&state, "bad-xtcp").await);
+        bad_task.abort();
+    }
+
+    #[tokio::test]
+    async fn xtcp_direct_recent_failure_skips_nat_lookup() {
+        let (state, mut server) = test_state();
+        mark_xtcp_direct_failure(&state, "cached-bad-xtcp").await;
+        let visitor = VisitorConfig {
+            name: "local-cached-bad-xtcp".to_string(),
+            visitor_type: ProxyType::Xtcp,
+            server_name: "cached-bad-xtcp".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+        let (_client, mut inbound) = tcp_pair().await;
+
+        let used_direct = try_xtcp_direct_visitor(&state, &visitor, &mut inbound)
+            .await
+            .unwrap();
+        let register = time::timeout(Duration::from_millis(200), read_msg(&mut server)).await;
+
+        assert!(!used_direct);
+        assert!(
+            register.is_err(),
+            "recent failure still performed NAT lookup"
+        );
     }
 
     #[tokio::test]
