@@ -74,6 +74,11 @@ struct SudpDirectPeer {
     updated_at: Instant,
 }
 
+struct SudpDirectOwnerSession {
+    local_socket: Arc<UdpSocket>,
+    peer: Arc<Mutex<SocketAddr>>,
+}
+
 #[derive(Clone)]
 struct NatHoleAnnouncement {
     transaction_id: String,
@@ -1205,7 +1210,9 @@ async fn start_sudp_direct_owner_listener(state: ClientState, proxy: ProxyConfig
         proxy.name, advertised_addr
     );
 
-    let sessions = Arc::new(Mutex::new(HashMap::<String, Arc<UdpSocket>>::new()));
+    let sessions = Arc::new(Mutex::new(
+        HashMap::<String, Arc<SudpDirectOwnerSession>>::new(),
+    ));
     tokio::spawn(async move {
         let mut buf = vec![0_u8; 64 * 1024];
         loop {
@@ -1287,11 +1294,12 @@ async fn sudp_direct_owner_session(
     proxy: &ProxyConfig,
     session_id: &str,
     direct_socket: Arc<UdpSocket>,
-    sessions: Arc<Mutex<HashMap<String, Arc<UdpSocket>>>>,
+    sessions: Arc<Mutex<HashMap<String, Arc<SudpDirectOwnerSession>>>>,
     peer: SocketAddr,
 ) -> Result<Arc<UdpSocket>> {
-    if let Some(socket) = sessions.lock().await.get(session_id).cloned() {
-        return Ok(socket);
+    if let Some(session) = sessions.lock().await.get(session_id).cloned() {
+        *session.peer.lock().await = peer;
+        return Ok(session.local_socket.clone());
     }
 
     let socket = Arc::new(
@@ -1299,39 +1307,45 @@ async fn sudp_direct_owner_session(
             .await
             .context("bind sudp direct local relay socket")?,
     );
-    let socket = {
+    let session = {
         let mut sessions_guard = sessions.lock().await;
         if let Some(existing) = sessions_guard.get(session_id) {
             existing.clone()
         } else {
-            sessions_guard.insert(session_id.to_string(), socket.clone());
+            let session = Arc::new(SudpDirectOwnerSession {
+                local_socket: socket,
+                peer: Arc::new(Mutex::new(peer)),
+            });
+            sessions_guard.insert(session_id.to_string(), session.clone());
             spawn_sudp_direct_owner_response_loop(
                 proxy.name.clone(),
                 session_id.to_string(),
-                socket.clone(),
+                session.clone(),
                 direct_socket,
                 sessions.clone(),
-                peer,
             );
-            socket
+            session
         }
     };
-    Ok(socket)
+    *session.peer.lock().await = peer;
+    Ok(session.local_socket.clone())
 }
 
 fn spawn_sudp_direct_owner_response_loop(
     proxy_name: String,
     session_id: String,
-    local_socket: Arc<UdpSocket>,
+    session: Arc<SudpDirectOwnerSession>,
     direct_socket: Arc<UdpSocket>,
-    sessions: Arc<Mutex<HashMap<String, Arc<UdpSocket>>>>,
-    peer: SocketAddr,
+    sessions: Arc<Mutex<HashMap<String, Arc<SudpDirectOwnerSession>>>>,
 ) {
     tokio::spawn(async move {
         let mut buf = vec![0_u8; 64 * 1024];
         loop {
-            let received =
-                time::timeout(Duration::from_secs(60), local_socket.recv_from(&mut buf)).await;
+            let received = time::timeout(
+                Duration::from_secs(60),
+                session.local_socket.recv_from(&mut buf),
+            )
+            .await;
             let n = match received {
                 Ok(Ok((n, _))) => n,
                 Ok(Err(err)) => {
@@ -1357,6 +1371,7 @@ fn spawn_sudp_direct_owner_response_loop(
                     break;
                 }
             };
+            let peer = *session.peer.lock().await;
             if let Err(err) = direct_socket.send_to(&payload, peer).await {
                 debug!("send sudp direct response failed: {err:#}");
                 break;
@@ -1366,7 +1381,7 @@ fn spawn_sudp_direct_owner_response_loop(
         let mut sessions = sessions.lock().await;
         if sessions
             .get(&session_id)
-            .map(|current| Arc::ptr_eq(current, &local_socket))
+            .map(|current| Arc::ptr_eq(current, &session))
             .unwrap_or(false)
         {
             sessions.remove(&session_id);
@@ -2749,6 +2764,76 @@ mod tests {
         assert!(frame.ack);
         assert!(frame.probe);
         assert!(!frame.from_visitor);
+    }
+
+    #[tokio::test]
+    async fn sudp_owner_session_responses_use_latest_peer() {
+        let proxy = ProxyConfig {
+            name: "sudp-echo".to_string(),
+            proxy_type: ProxyType::Sudp,
+            local_ip: "127.0.0.1".to_string(),
+            local_port: 7001,
+            remote_port: 0,
+            group: None,
+            group_key: None,
+            custom_domains: Vec::new(),
+            locations: Vec::new(),
+            host_header_rewrite: None,
+            request_headers: Default::default(),
+            http_user: None,
+            http_password: None,
+            bandwidth_limit: None,
+            sk: Some("secret".to_string()),
+            health_check: None,
+        };
+        let direct_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let sessions = Arc::new(Mutex::new(
+            HashMap::<String, Arc<SudpDirectOwnerSession>>::new(),
+        ));
+        let session_id = "local-sudp|127.0.0.1:50000";
+        let peer_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        let local_a = sudp_direct_owner_session(
+            &proxy,
+            session_id,
+            direct_socket.clone(),
+            sessions.clone(),
+            peer_a.local_addr().unwrap(),
+        )
+        .await
+        .unwrap();
+        let local_b = sudp_direct_owner_session(
+            &proxy,
+            session_id,
+            direct_socket,
+            sessions,
+            peer_b.local_addr().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(Arc::ptr_eq(&local_a, &local_b));
+
+        let local_service = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let local_target = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            local_b.local_addr().unwrap().port(),
+        );
+        local_service.send_to(b"pong", local_target).await.unwrap();
+
+        let mut buf = vec![0_u8; 1024];
+        let (n, _) = time::timeout(Duration::from_secs(1), peer_b.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        let frame = parse_sudp_direct_frame(&buf[..n]).unwrap();
+        assert_eq!(frame.proxy_name, "sudp-echo");
+        assert_eq!(frame.session_id, session_id);
+        assert_eq!(frame.content, b"pong");
+        assert!(!frame.from_visitor);
+
+        let stale = time::timeout(Duration::from_millis(100), peer_a.recv_from(&mut buf)).await;
+        assert!(stale.is_err(), "response was sent to stale peer");
     }
 
     #[tokio::test]
