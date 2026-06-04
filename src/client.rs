@@ -927,6 +927,23 @@ async fn handle_xtcp_direct_owner_conn(proxy: ProxyConfig, mut stream: TcpStream
         other => bail!("unexpected xtcp direct handshake: {other:?}"),
     };
 
+    let local_addr = format!("{}:{}", proxy.local_ip, proxy.local_port);
+    let mut local = match TcpStream::connect(&local_addr).await {
+        Ok(local) => local,
+        Err(err) => {
+            write_msg(
+                &mut stream,
+                &Message::NewVisitorConnResp {
+                    proxy_name: requested_proxy,
+                    error: format!("connect local xtcp service failed: {err}"),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    configure_tcp_stream(&local);
+
     write_msg(
         &mut stream,
         &Message::NewVisitorConnResp {
@@ -935,11 +952,6 @@ async fn handle_xtcp_direct_owner_conn(proxy: ProxyConfig, mut stream: TcpStream
         },
     )
     .await?;
-    let local_addr = format!("{}:{}", proxy.local_ip, proxy.local_port);
-    let mut local = TcpStream::connect(&local_addr)
-        .await
-        .with_context(|| format!("connect local xtcp service at {local_addr}"))?;
-    configure_tcp_stream(&local);
     io::copy_bidirectional(&mut stream, &mut local)
         .await
         .with_context(|| format!("copy xtcp direct bytes for {requested_proxy}"))?;
@@ -3104,6 +3116,52 @@ mod tests {
             register.is_err(),
             "recent failure still performed NAT lookup"
         );
+    }
+
+    #[tokio::test]
+    async fn xtcp_direct_owner_rejects_when_local_service_unavailable() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let missing_port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let proxy = ProxyConfig {
+            name: "xtcp-missing-local".to_string(),
+            proxy_type: ProxyType::Xtcp,
+            local_ip: "127.0.0.1".to_string(),
+            local_port: missing_port,
+            remote_port: 0,
+            group: None,
+            group_key: None,
+            custom_domains: Vec::new(),
+            locations: Vec::new(),
+            host_header_rewrite: None,
+            request_headers: Default::default(),
+            http_user: None,
+            http_password: None,
+            bandwidth_limit: None,
+            sk: Some("secret".to_string()),
+            health_check: None,
+        };
+        let (mut visitor, owner) = tcp_pair().await;
+        let owner_task = tokio::spawn(handle_xtcp_direct_owner_conn(proxy, owner));
+
+        write_msg(
+            &mut visitor,
+            &Message::NewVisitorConn {
+                proxy_name: "xtcp-missing-local".to_string(),
+                sk: Some("secret".to_string()),
+                token: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        match read_msg(&mut visitor).await.unwrap() {
+            Message::NewVisitorConnResp { error, .. } => {
+                assert!(error.contains("connect local xtcp service failed"));
+            }
+            other => panic!("unexpected direct response: {other:?}"),
+        }
+        owner_task.await.unwrap().unwrap();
     }
 
     #[tokio::test]
