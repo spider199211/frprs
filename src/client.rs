@@ -1452,11 +1452,6 @@ async fn try_sudp_direct_visitor(
     if let Some(peer) = take_fresh_sudp_direct_peer(state, session_id).await {
         match send_sudp_direct_payload(&direct_socket, visitor, session_id, content, peer).await {
             Ok(()) => {
-                state
-                    .sudp_direct_confirmed
-                    .lock()
-                    .await
-                    .insert(session_id.to_string());
                 return Ok(true);
             }
             Err(err) => {
@@ -1746,7 +1741,8 @@ fn spawn_sudp_direct_visitor_response_loop(
                 }
                 Err(_) => break,
             };
-            let Some((response_session_id, content)) = parse_sudp_direct_response(&buf[..n]) else {
+            let Some((response_session_id, content, ack)) = parse_sudp_direct_response(&buf[..n])
+            else {
                 continue;
             };
             if response_session_id != session_id {
@@ -1763,11 +1759,13 @@ fn spawn_sudp_direct_visitor_response_loop(
                 debug!("sudp direct pending flush failed: {err:#}");
                 continue;
             }
-            state
-                .sudp_direct_confirmed
-                .lock()
-                .await
-                .insert(session_id.clone());
+            if !ack {
+                state
+                    .sudp_direct_confirmed
+                    .lock()
+                    .await
+                    .insert(session_id.clone());
+            }
             if let Some(content) = content {
                 if let Err(err) =
                     handle_sudp_visitor_response(state.clone(), session_id.clone(), content).await
@@ -1862,13 +1860,13 @@ fn schedule_sudp_relay_fallback(
     });
 }
 
-fn parse_sudp_direct_response(data: &[u8]) -> Option<(String, Option<Vec<u8>>)> {
+fn parse_sudp_direct_response(data: &[u8]) -> Option<(String, Option<Vec<u8>>, bool)> {
     let frame = parse_sudp_direct_frame(data)?;
     if frame.from_visitor {
         return None;
     }
     let content = if frame.ack { None } else { Some(frame.content) };
-    Some((frame.session_id, content))
+    Some((frame.session_id, content, frame.ack))
 }
 
 fn parse_sudp_direct_frame(data: &[u8]) -> Option<DirectSudpFrame> {
@@ -3216,7 +3214,7 @@ mod tests {
         assert_eq!(frame.session_id, session_id);
         assert_eq!(frame.content, b"hello sudp");
         assert!(!frame.probe);
-        assert!(state
+        assert!(!state
             .sudp_direct_confirmed
             .lock()
             .await
@@ -3234,6 +3232,124 @@ mod tests {
             .lock()
             .await
             .contains_key(&session_id));
+    }
+
+    #[tokio::test]
+    async fn sudp_direct_data_response_confirms_selected_peer() {
+        let (state, _server) = test_state();
+        let session_id = "visitor|127.0.0.1:50000".to_string();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let socket_addr = socket.local_addr().unwrap();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let visitor_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        state.sudp_visitor_sessions.lock().await.insert(
+            session_id.clone(),
+            SudpVisitorSession {
+                socket: visitor_socket,
+                peer: peer.local_addr().unwrap(),
+            },
+        );
+        spawn_sudp_direct_visitor_response_loop(state.clone(), session_id.clone(), socket);
+
+        let response = DirectSudpFrame {
+            magic: DIRECT_SUDP_MAGIC.to_string(),
+            proxy_name: "sudp-echo".to_string(),
+            session_id: session_id.clone(),
+            content: b"pong".to_vec(),
+            sk: None,
+            from_visitor: false,
+            ack: false,
+            probe: false,
+        };
+        peer.send_to(&serde_json::to_vec(&response).unwrap(), socket_addr)
+            .await
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if state
+                .sudp_direct_confirmed
+                .lock()
+                .await
+                .contains(&session_id)
+            {
+                return;
+            }
+            time::sleep(Duration::from_millis(20)).await;
+        }
+
+        panic!("sudp direct data response did not confirm peer");
+    }
+
+    #[tokio::test]
+    async fn sudp_relay_fallback_still_sends_after_direct_ack_without_response() {
+        let (state, mut server) = test_state();
+        let session_id = "visitor|127.0.0.1:50000".to_string();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let socket_addr = socket.local_addr().unwrap();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        spawn_sudp_direct_visitor_response_loop(state.clone(), session_id.clone(), socket);
+
+        let ack = DirectSudpFrame {
+            magic: DIRECT_SUDP_MAGIC.to_string(),
+            proxy_name: "sudp-echo".to_string(),
+            session_id: session_id.clone(),
+            content: Vec::new(),
+            sk: None,
+            from_visitor: false,
+            ack: true,
+            probe: false,
+        };
+        peer.send_to(&serde_json::to_vec(&ack).unwrap(), socket_addr)
+            .await
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if state
+                .sudp_direct_visitor_peers
+                .lock()
+                .await
+                .contains_key(&session_id)
+            {
+                break;
+            }
+            time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!state
+            .sudp_direct_confirmed
+            .lock()
+            .await
+            .contains(&session_id));
+
+        schedule_sudp_relay_fallback(
+            state,
+            "sudp-echo".to_string(),
+            session_id.clone(),
+            b"hello".to_vec(),
+            Some("secret".to_string()),
+        );
+
+        match time::timeout(Duration::from_secs(1), read_msg(&mut server))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Message::SudpPacket {
+                proxy_name,
+                session_id: got_session_id,
+                content,
+                sk,
+                from_visitor,
+            } => {
+                assert_eq!(proxy_name, "sudp-echo");
+                assert_eq!(got_session_id, session_id);
+                assert_eq!(content, b"hello");
+                assert_eq!(sk.as_deref(), Some("secret"));
+                assert!(from_visitor);
+            }
+            other => panic!("unexpected fallback message: {other:?}"),
+        }
     }
 
     #[tokio::test]
