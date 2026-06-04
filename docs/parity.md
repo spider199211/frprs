@@ -8,7 +8,7 @@ This file tracks the Rust rewrite against the upstream `fatedier/frp` feature su
 | TOML config loading | Implemented | Supports frp-style core fields. More legacy and include-file behavior remains. |
 | Token authentication | Implemented | Shared `[auth].token` checked on login, work connections, and ping. |
 | TCP proxy | Implemented | Control connection, work connection request, remote listener, bidirectional forwarding. |
-| UDP proxy | Implemented | Request/response forwarding, local NAT session reuse, bidirectional batching, batch destination caching, and groups are implemented. Deeper packet-path optimizations remain. |
+| UDP proxy | Implemented | Request/response forwarding, local NAT session reuse, bidirectional batching, grouped packet batching, batch destination caching, and groups are implemented. Deeper packet-path optimizations remain. |
 | HTTP proxy | Implemented | Routes by `Host`, wildcard domains, `locations`, header rewrite, Basic Auth, real IP headers, and groups. |
 | HTTPS proxy | Implemented | Routes by TLS SNI / `customDomains`, wildcard domains, `*` fallback, groups, and raw passthrough. |
 | Connection pool | Implemented | `poolCount` pre-opens work connections, coalesces replenishment, requests only immediate waiter demand, and reuses QUIC client sessions for control/work/visitor streams. |
@@ -35,7 +35,7 @@ This file tracks the Rust rewrite against the upstream `fatedier/frp` feature su
 Current tested flows:
 
 - TCP echo through `frps` and `frpc`.
-- UDP echo through `frps` and `frpc`.
+- UDP echo through `frps` and `frpc`, including grouped packet batching.
 - HTTP request routed by `Host` through `frps` and `frpc`.
 - HTTPS passthrough request routed by TLS SNI through `frps` and `frpc`.
 - TCP health check closing an unhealthy proxy listener.

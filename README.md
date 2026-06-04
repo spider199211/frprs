@@ -29,7 +29,7 @@ This is a Rust rewrite scaffold for `fatedier/frp`.
 - TCP `group`/`groupKey` 分组负载均衡，支持多个代理共享同一远端端口
 - 通过 `poolCount` 预创建 work connection 连接池，合并高并发下的补池请求，并按等待者即时需求精确请求连接
 - 通过 `bandwidthLimit` 对 TCP/HTTP/HTTPS 做带宽限制
-- UDP 本地会话复用、双向批量转发、批处理热路径缓存和 `group`/`groupKey` 分组负载均衡
+- UDP 本地会话复用、双向批量转发、分组批量转发、批处理热路径缓存和 `group`/`groupKey` 分组负载均衡
 - `frpc` 根据配置文件修改时间自动热加载
 - 轻量级 `frps` Dashboard，支持 `/`、`/api/status`、`/api/clients`、`/api/proxies`、`/api/groups`、`/api/metrics`
 - Dashboard Admin API 支持运行时重置指标计数
@@ -261,7 +261,7 @@ cargo run --bin frpc -- -c conf/frpc.toml
 
 - TCP：已实现基础反向代理链路和 `group`/`groupKey` 分组负载均衡。
 - HTTP：已实现按 `Host`、通配域名和 `locations` 的转发，并支持请求头改写、Basic Auth、真实 IP 请求头和分组负载均衡。
-- UDP：已实现基础请求/响应转发、本地 NAT 会话复用、双向包批量转发、批处理目标缓存和分组负载均衡；更深入的包级优化仍待完善。
+- UDP：已实现基础请求/响应转发、本地 NAT 会话复用、双向包批量转发、分组包批量转发、批处理目标缓存和分组负载均衡；更深入的包级优化仍待完善。
 - HTTPS：已实现 SNI 嗅探、原始 TLS 透传、通配域名、`*` 兜底路由和分组负载均衡。
 - TCP mux：已实现基于 HTTP CONNECT 的基础隧道路由和分组负载均衡。
 - 健康检查：已实现 TCP/HTTP 健康检查，并在 Dashboard/API 中暴露代理健康状态。
@@ -488,7 +488,7 @@ Parity roadmap:
 
 - TCP: first milestone and `group`/`groupKey` load balancing implemented.
 - HTTP: Host, wildcard-domain, and `locations` routing implemented, with header rewrite, Basic Auth, real-IP headers, and group load balancing.
-- UDP: basic request/response forwarding, local NAT session reuse, bidirectional packet batching, batch destination caching, and group load balancing implemented; deeper packet-level optimizations remain.
+- UDP: basic request/response forwarding, local NAT session reuse, bidirectional packet batching, grouped packet batching, batch destination caching, and group load balancing implemented; deeper packet-level optimizations remain.
 - HTTPS: SNI sniffing, raw TLS passthrough routing, wildcard domains, `*` fallback routing, and group load balancing implemented.
 - TCP mux: basic HTTP CONNECT tunnel routing and group load balancing implemented.
 - Health checks: TCP and HTTP health checks implemented, with proxy health status exposed through the Dashboard/API.
@@ -500,7 +500,7 @@ Parity roadmap:
 - TLS/WebSocket/QUIC/KCP: real control/work transports implemented and covered by end-to-end proxy tests; QUIC reuses one client connection for control/work/visitor bidirectional streams.
 - STCP/XTCP: private visitor flow and group load balancing implemented for TCP streams; XTCP now has a direct data path for reachable peers plus server-relay fallback.
 - SUDP/XTCP/P2P: XTCP/SUDP direct-first data paths, SUDP private-service group load balancing, XTCP/SUDP direct registration and probing by group name, periodic XTCP/SUDP owner candidate refresh, multiple peers per NAT transaction with per-peer expiry and candidate round-robin, short XTCP/SUDP wait for async matches after `waiting`, SUDP probe-based path selection with short retries, SUDP owner-side active punching with short retries, SUDP owner response peer refresh, SUDP TTL-capped direct peer confirmation/unconfirmed fallback, server-relay fallback, two-sided NAT match notification, client-side TTL-capped async notification caching, candidate preference, and XTCP candidate racing are implemented; fuller complex NAT scenarios still need broader validation and tuning.
-- Transport/hot paths: TLS, WebSocket, QUIC client-session reuse, basic TCP mux, work-connection replenish coalescing, waiter demand-aware requests, and UDP batch-path caching implemented; add fuller TCP stream mux reuse and more connection-pool tuning.
+- Transport/hot paths: TLS, WebSocket, QUIC client-session reuse, basic TCP mux, work-connection replenish coalescing, waiter demand-aware requests, UDP group batching, and UDP batch-path caching implemented; add fuller TCP stream mux reuse and more connection-pool tuning.
 - Runtime controls: lightweight Admin API, richer status APIs, metrics endpoint/reset, proxy/group/client close operations, and runtime `allowPorts` updates implemented; full runtime config management remains.
 - Policy: allow ports and TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/XTCP/SUDP group load balancing implemented; broader protocol group support remains.
 - Plugins: server-side TCP/UDP/SUDP/HTTP/HTTPS/TCPMUX new-user-connection hook and client-side local-connect HTTP hook implemented for TCP/UDP/SUDP with `op` compatibility fields; more protocol compatibility remains.

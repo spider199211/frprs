@@ -137,6 +137,11 @@ struct UdpGroupRoute {
     proxy_name: String,
 }
 
+struct QueuedUdpPacket {
+    control: Arc<Control>,
+    packet: UdpPacketFrame,
+}
+
 struct UdpGroup {
     group_name: String,
     group_key: Option<String>,
@@ -1334,6 +1339,51 @@ async fn next_tcp_group_route(state: ServerState, map_key: &str) -> Option<TcpGr
     group.routes.get(index).cloned()
 }
 
+fn spawn_udp_packet_batcher(
+    name: String,
+    mut packet_rx: mpsc::Receiver<QueuedUdpPacket>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(first) = packet_rx.recv().await {
+            let mut queued = Vec::with_capacity(32);
+            queued.push(first);
+            time::sleep(Duration::from_millis(2)).await;
+            while queued.len() < 32 {
+                let Ok(packet) = packet_rx.try_recv() else {
+                    break;
+                };
+                queued.push(packet);
+            }
+
+            let mut by_control: HashMap<String, (Arc<Control>, Vec<UdpPacketFrame>)> =
+                HashMap::new();
+            for queued_packet in queued {
+                let entry = by_control
+                    .entry(queued_packet.control.run_id.clone())
+                    .or_insert_with(|| (queued_packet.control.clone(), Vec::new()));
+                entry.1.push(queued_packet.packet);
+            }
+
+            for (_, (control, mut packets)) in by_control {
+                let msg = if packets.len() == 1 {
+                    let packet = packets.pop().expect("batch has one packet");
+                    Message::UdpPacket {
+                        proxy_name: packet.proxy_name,
+                        content: packet.content,
+                        visitor_addr: packet.visitor_addr,
+                    }
+                } else {
+                    Message::UdpPacketBatch { packets }
+                };
+
+                if let Err(err) = control.send(&msg).await {
+                    warn!("{name} failed to forward packet batch to client: {err:#}");
+                }
+            }
+        }
+    })
+}
+
 async fn start_udp_proxy(
     state: ServerState,
     control: Arc<Control>,
@@ -1362,40 +1412,11 @@ async fn start_udp_proxy(
     let run_id = control.run_id.clone();
     let task_proxy_name = proxy_name.clone();
     let metrics = state.metrics.clone();
-    let (packet_tx, mut packet_rx) = mpsc::channel::<UdpPacketFrame>(128);
-    let batch_control = control.clone();
-    let batch_proxy_name = proxy_name.clone();
+    let (packet_tx, packet_rx) = mpsc::channel::<QueuedUdpPacket>(128);
+    spawn_udp_packet_batcher(format!("udp proxy {proxy_name}"), packet_rx);
     let task_state = state.clone();
     let task_control = control.clone();
     let task_remote_addr = remote_addr.clone();
-    tokio::spawn(async move {
-        while let Some(first) = packet_rx.recv().await {
-            let mut packets = vec![first];
-            time::sleep(Duration::from_millis(2)).await;
-            while packets.len() < 32 {
-                let Ok(packet) = packet_rx.try_recv() else {
-                    break;
-                };
-                packets.push(packet);
-            }
-
-            let msg = if packets.len() == 1 {
-                let packet = packets.pop().expect("batch has one packet");
-                Message::UdpPacket {
-                    proxy_name: packet.proxy_name,
-                    content: packet.content,
-                    visitor_addr: packet.visitor_addr,
-                }
-            } else {
-                Message::UdpPacketBatch { packets }
-            };
-
-            if let Err(err) = batch_control.send(&msg).await {
-                warn!("udp proxy {batch_proxy_name} failed to forward packet batch to client: {err:#}");
-                break;
-            }
-        }
-    });
     let task = tokio::spawn(async move {
         let mut buf = vec![0_u8; 64 * 1024];
         loop {
@@ -1426,7 +1447,13 @@ async fn start_udp_proxy(
                         content: buf[..n].to_vec(),
                         visitor_addr,
                     };
-                    if let Err(err) = packet_tx.send(packet).await {
+                    if let Err(err) = packet_tx
+                        .send(QueuedUdpPacket {
+                            control: task_control.clone(),
+                            packet,
+                        })
+                        .await
+                    {
                         warn!("udp proxy {task_proxy_name} failed to queue packet batch: {err:#}");
                         break;
                     }
@@ -1520,6 +1547,8 @@ async fn start_udp_group_proxy(
             let task_socket = socket.clone();
             let task_remote_addr = remote_addr.clone();
             let metrics = state.metrics.clone();
+            let (packet_tx, packet_rx) = mpsc::channel::<QueuedUdpPacket>(128);
+            spawn_udp_packet_batcher(format!("udp group {group}"), packet_rx);
             let task = tokio::spawn(async move {
                 let mut buf = vec![0_u8; 64 * 1024];
                 loop {
@@ -1559,16 +1588,23 @@ async fn start_udp_group_proxy(
                                 );
                                 continue;
                             }
-                            let msg = Message::UdpPacket {
+                            let packet = UdpPacketFrame {
                                 proxy_name: route.proxy_name.clone(),
                                 content: buf[..n].to_vec(),
                                 visitor_addr,
                             };
-                            if let Err(err) = route.control.send(&msg).await {
+                            if let Err(err) = packet_tx
+                                .send(QueuedUdpPacket {
+                                    control: route.control.clone(),
+                                    packet,
+                                })
+                                .await
+                            {
                                 warn!(
-                                    "udp group route {} failed to forward packet to client: {err:#}",
+                                    "udp group route {} failed to queue packet batch: {err:#}",
                                     route.proxy_name
                                 );
+                                break;
                             }
                         }
                         Err(err) => {

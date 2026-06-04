@@ -3197,6 +3197,170 @@ async fn udp_proxy_batches_visitor_packets_to_client() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn udp_group_batches_visitor_packets_to_each_member() {
+    let _guard = acquire_test_lock().await;
+    let bind_port = unused_port();
+    let remote_port = unused_port();
+    let server_cfg = ServerConfig {
+        bind_addr: "127.0.0.1".to_string(),
+        bind_port,
+        proxy_bind_addr: "127.0.0.1".to_string(),
+        vhost_http_port: 0,
+        vhost_https_port: 0,
+        dashboard_addr: "127.0.0.1".to_string(),
+        dashboard_port: 0,
+        allow_ports: Vec::new(),
+        auth: AuthConfig {
+            token: Some("secret".to_string()),
+        },
+        plugins: ServerPluginConfig::default(),
+        transport: TransportConfig::default(),
+    };
+    let server_task = tokio::spawn(server::run(server_cfg));
+    sleep(Duration::from_millis(100)).await;
+
+    let mut control_a = connect_with_retry(format!("127.0.0.1:{bind_port}")).await;
+    write_msg(
+        &mut control_a,
+        &Message::Login {
+            version: "test".to_string(),
+            hostname: "test-a".to_string(),
+            os: "test".to_string(),
+            arch: "test".to_string(),
+            run_id: "udp-group-a-run".to_string(),
+            token: Some("secret".to_string()),
+            pool_count: 0,
+        },
+    )
+    .await
+    .unwrap();
+    match read_msg(&mut control_a).await.unwrap() {
+        Message::LoginResp { error, .. } if error.is_empty() => {}
+        other => panic!("unexpected login response: {other:?}"),
+    }
+    write_msg(
+        &mut control_a,
+        &Message::NewProxy {
+            proxy_name: "udp-group-a".to_string(),
+            proxy_type: "udp".to_string(),
+            remote_port,
+            group: Some("udp-batch-group".to_string()),
+            group_key: Some("secret-group".to_string()),
+            custom_domains: Vec::new(),
+            locations: Vec::new(),
+            host_header_rewrite: None,
+            request_headers: Default::default(),
+            http_user: None,
+            http_password: None,
+            bandwidth_limit: None,
+            sk: None,
+        },
+    )
+    .await
+    .unwrap();
+    match read_msg(&mut control_a).await.unwrap() {
+        Message::NewProxyResp { error, .. } if error.is_empty() => {}
+        other => panic!("unexpected proxy response: {other:?}"),
+    }
+
+    let mut control_b = connect_with_retry(format!("127.0.0.1:{bind_port}")).await;
+    write_msg(
+        &mut control_b,
+        &Message::Login {
+            version: "test".to_string(),
+            hostname: "test-b".to_string(),
+            os: "test".to_string(),
+            arch: "test".to_string(),
+            run_id: "udp-group-b-run".to_string(),
+            token: Some("secret".to_string()),
+            pool_count: 0,
+        },
+    )
+    .await
+    .unwrap();
+    match read_msg(&mut control_b).await.unwrap() {
+        Message::LoginResp { error, .. } if error.is_empty() => {}
+        other => panic!("unexpected login response: {other:?}"),
+    }
+    write_msg(
+        &mut control_b,
+        &Message::NewProxy {
+            proxy_name: "udp-group-b".to_string(),
+            proxy_type: "udp".to_string(),
+            remote_port,
+            group: Some("udp-batch-group".to_string()),
+            group_key: Some("secret-group".to_string()),
+            custom_domains: Vec::new(),
+            locations: Vec::new(),
+            host_header_rewrite: None,
+            request_headers: Default::default(),
+            http_user: None,
+            http_password: None,
+            bandwidth_limit: None,
+            sk: None,
+        },
+    )
+    .await
+    .unwrap();
+    match read_msg(&mut control_b).await.unwrap() {
+        Message::NewProxyResp { error, .. } if error.is_empty() => {}
+        other => panic!("unexpected proxy response: {other:?}"),
+    }
+
+    let visitor = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    for idx in 0..8 {
+        visitor
+            .send_to(
+                format!("group-batch-{idx}").as_bytes(),
+                format!("127.0.0.1:{remote_port}"),
+            )
+            .await
+            .unwrap();
+    }
+
+    let mut batch_a = None;
+    let mut batch_b = None;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && (batch_a.is_none() || batch_b.is_none()) {
+        if batch_a.is_none() {
+            if let Ok(Ok(msg)) =
+                tokio::time::timeout(Duration::from_millis(500), read_msg(&mut control_a)).await
+            {
+                match msg {
+                    Message::UdpPacketBatch { packets } => batch_a = Some(packets),
+                    Message::UdpPacket { .. } => {}
+                    other => panic!("unexpected control-a message: {other:?}"),
+                }
+            }
+        }
+        if batch_b.is_none() {
+            if let Ok(Ok(msg)) =
+                tokio::time::timeout(Duration::from_millis(500), read_msg(&mut control_b)).await
+            {
+                match msg {
+                    Message::UdpPacketBatch { packets } => batch_b = Some(packets),
+                    Message::UdpPacket { .. } => {}
+                    other => panic!("unexpected control-b message: {other:?}"),
+                }
+            }
+        }
+    }
+
+    let packets_a = batch_a.expect("server did not batch packets for udp-group-a");
+    let packets_b = batch_b.expect("server did not batch packets for udp-group-b");
+    assert!(packets_a.len() >= 2, "{packets_a:?}");
+    assert!(packets_b.len() >= 2, "{packets_b:?}");
+    assert!(packets_a
+        .iter()
+        .all(|packet| packet.proxy_name == "udp-group-a"));
+    assert!(packets_b
+        .iter()
+        .all(|packet| packet.proxy_name == "udp-group-b"));
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn udp_proxy_batches_local_responses_to_server() {
     let _guard = acquire_test_lock().await;
     let udp_service = UdpSocket::bind("127.0.0.1:0").await.unwrap();
