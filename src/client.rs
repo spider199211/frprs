@@ -27,6 +27,7 @@ use tracing::{debug, error, info, warn};
 const DIRECT_SUDP_MAGIC: &str = "frprs-sudp-direct-v1";
 const NAT_HOLE_CACHED_RESPONSE_TTL: Duration = Duration::from_secs(30);
 const NAT_HOLE_OWNER_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+const SUDP_DIRECT_PEER_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 struct ClientState {
@@ -37,7 +38,7 @@ struct ClientState {
     sudp_visitor_sessions: Arc<Mutex<HashMap<String, SudpVisitorSession>>>,
     sudp_direct_owner_sockets: Arc<Mutex<HashMap<String, Arc<UdpSocket>>>>,
     sudp_direct_visitor_sockets: Arc<Mutex<HashMap<String, Arc<UdpSocket>>>>,
-    sudp_direct_visitor_peers: Arc<Mutex<HashMap<String, SocketAddr>>>,
+    sudp_direct_visitor_peers: Arc<Mutex<HashMap<String, SudpDirectPeer>>>,
     sudp_direct_pending: Arc<Mutex<HashMap<String, VecDeque<DirectSudpFrame>>>>,
     sudp_direct_confirmed: Arc<Mutex<HashSet<String>>>,
     sudp_direct_probe_sessions: Arc<Mutex<HashSet<String>>>,
@@ -65,6 +66,12 @@ struct NatHoleResponse {
 struct NatHoleCachedResponse {
     resp: NatHoleResponse,
     cached_at: Instant,
+}
+
+#[derive(Clone, Copy)]
+struct SudpDirectPeer {
+    addr: SocketAddr,
+    updated_at: Instant,
 }
 
 #[derive(Clone)]
@@ -1374,13 +1381,7 @@ async fn try_sudp_direct_visitor(
     content: &[u8],
 ) -> Result<bool> {
     let direct_socket = sudp_direct_visitor_socket(state, session_id, &visitor.bind_addr).await?;
-    if let Some(peer) = state
-        .sudp_direct_visitor_peers
-        .lock()
-        .await
-        .get(session_id)
-        .copied()
-    {
+    if let Some(peer) = take_fresh_sudp_direct_peer(state, session_id).await {
         match send_sudp_direct_payload(&direct_socket, visitor, session_id, content, peer).await {
             Ok(()) => {
                 state
@@ -1462,6 +1463,18 @@ async fn try_sudp_direct_visitor(
         );
     }
     Ok(sent)
+}
+
+async fn take_fresh_sudp_direct_peer(state: &ClientState, session_id: &str) -> Option<SocketAddr> {
+    let mut peers = state.sudp_direct_visitor_peers.lock().await;
+    let peer = peers.get(session_id).copied()?;
+    if peer.updated_at.elapsed() <= SUDP_DIRECT_PEER_TTL {
+        return Some(peer.addr);
+    }
+    peers.remove(session_id);
+    drop(peers);
+    state.sudp_direct_confirmed.lock().await.remove(session_id);
+    None
 }
 
 async fn send_sudp_direct_probe(
@@ -1671,11 +1684,13 @@ fn spawn_sudp_direct_visitor_response_loop(
             if response_session_id != session_id {
                 continue;
             }
-            state
-                .sudp_direct_visitor_peers
-                .lock()
-                .await
-                .insert(session_id.clone(), peer);
+            state.sudp_direct_visitor_peers.lock().await.insert(
+                session_id.clone(),
+                SudpDirectPeer {
+                    addr: peer,
+                    updated_at: Instant::now(),
+                },
+            );
             if let Err(err) = flush_sudp_direct_pending(&state, &session_id, &socket, peer).await {
                 debug!("sudp direct pending flush failed: {err:#}");
                 continue;
@@ -2929,20 +2944,98 @@ mod tests {
             .lock()
             .await
             .contains(&session_id));
-        assert_eq!(
-            state
-                .sudp_direct_visitor_peers
-                .lock()
-                .await
-                .get(&session_id)
-                .copied(),
-            Some(peer.local_addr().unwrap())
-        );
+        let direct_peer = state
+            .sudp_direct_visitor_peers
+            .lock()
+            .await
+            .get(&session_id)
+            .copied()
+            .unwrap();
+        assert_eq!(direct_peer.addr, peer.local_addr().unwrap());
         assert!(!state
             .sudp_direct_pending
             .lock()
             .await
             .contains_key(&session_id));
+    }
+
+    #[tokio::test]
+    async fn sudp_direct_stale_peer_triggers_nat_lookup() {
+        let (state, mut server) = test_state();
+        let session_id = "local-sudp|127.0.0.1:50000".to_string();
+        let stale_peer = "127.0.0.1:40000".parse().unwrap();
+        state.sudp_direct_visitor_peers.lock().await.insert(
+            session_id.clone(),
+            SudpDirectPeer {
+                addr: stale_peer,
+                updated_at: Instant::now() - SUDP_DIRECT_PEER_TTL - Duration::from_secs(1),
+            },
+        );
+        state
+            .sudp_direct_confirmed
+            .lock()
+            .await
+            .insert(session_id.clone());
+        let visitor = VisitorConfig {
+            name: "local-sudp".to_string(),
+            visitor_type: ProxyType::Sudp,
+            server_name: "sudp-echo".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+
+        let request_state = state.clone();
+        let request_session_id = session_id.clone();
+        let request = tokio::spawn(async move {
+            try_sudp_direct_visitor(&request_state, &visitor, &request_session_id, b"hello").await
+        });
+
+        match time::timeout(Duration::from_secs(1), read_msg(&mut server))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Message::NatHoleRegister {
+                transaction_id,
+                proxy_name,
+                role,
+                local_addrs,
+            } => {
+                assert_eq!(transaction_id, "sudp-echo");
+                assert_eq!(proxy_name, "sudp-echo");
+                assert_eq!(role, "visitor");
+                assert_eq!(local_addrs.len(), 1);
+            }
+            other => panic!("unexpected nat hole register: {other:?}"),
+        }
+
+        handle_nat_hole_response(
+            &state,
+            "sudp-echo".to_string(),
+            "sudp-echo".to_string(),
+            "visitor".to_string(),
+            NatHoleResponse {
+                peer_observed_addr: String::new(),
+                peer_local_addrs: Vec::new(),
+                waiting: true,
+                error: String::new(),
+            },
+        )
+        .await;
+
+        let used_direct = request.await.unwrap().unwrap();
+        assert!(!used_direct);
+        assert!(!state
+            .sudp_direct_visitor_peers
+            .lock()
+            .await
+            .contains_key(&session_id));
+        assert!(!state
+            .sudp_direct_confirmed
+            .lock()
+            .await
+            .contains(&session_id));
     }
 
     #[tokio::test]
