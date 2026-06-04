@@ -29,6 +29,7 @@ const NAT_HOLE_CACHED_RESPONSE_TTL: Duration = Duration::from_secs(30);
 const NAT_HOLE_OWNER_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 const XTCP_DIRECT_FAILURE_TTL: Duration = Duration::from_secs(5);
 const SUDP_DIRECT_PEER_TTL: Duration = Duration::from_secs(30);
+const SUDP_DIRECT_PENDING_LIMIT: usize = 64;
 
 #[derive(Clone)]
 struct ClientState {
@@ -1493,19 +1494,6 @@ async fn try_sudp_direct_visitor(
         return Ok(false);
     }
 
-    state
-        .sudp_direct_pending
-        .lock()
-        .await
-        .entry(session_id.to_string())
-        .or_default()
-        .push_back(sudp_direct_visitor_frame(
-            visitor,
-            session_id,
-            content.to_vec(),
-            false,
-        ));
-
     let mut candidates = Vec::new();
     for candidate in direct_candidates(&resp) {
         let Ok(addr) = candidate.parse::<SocketAddr>() else {
@@ -1514,6 +1502,11 @@ async fn try_sudp_direct_visitor(
         };
         candidates.push(addr);
     }
+    if candidates.is_empty() {
+        return Ok(false);
+    }
+
+    push_sudp_direct_pending(state, visitor, session_id, content).await;
     let sent = send_sudp_direct_probe(&direct_socket, visitor, session_id, &candidates).await?;
     if !sent {
         remove_sudp_pending_payload(state, session_id, content).await;
@@ -1666,6 +1659,25 @@ async fn send_sudp_direct_payload(
         .await
         .with_context(|| format!("send sudp direct packet to {peer}"))?;
     Ok(())
+}
+
+async fn push_sudp_direct_pending(
+    state: &ClientState,
+    visitor: &VisitorConfig,
+    session_id: &str,
+    content: &[u8],
+) {
+    let mut pending = state.sudp_direct_pending.lock().await;
+    let queue = pending.entry(session_id.to_string()).or_default();
+    while queue.len() >= SUDP_DIRECT_PENDING_LIMIT {
+        queue.pop_front();
+    }
+    queue.push_back(sudp_direct_visitor_frame(
+        visitor,
+        session_id,
+        content.to_vec(),
+        false,
+    ));
 }
 
 async fn remove_sudp_pending_payload(state: &ClientState, session_id: &str, content: &[u8]) {
@@ -3279,6 +3291,39 @@ mod tests {
         }
 
         panic!("sudp direct data response did not confirm peer");
+    }
+
+    #[tokio::test]
+    async fn sudp_direct_pending_payloads_are_bounded_per_session() {
+        let (state, _server) = test_state();
+        let session_id = "visitor|127.0.0.1:50000";
+        let visitor = VisitorConfig {
+            name: "visitor".to_string(),
+            visitor_type: ProxyType::Sudp,
+            server_name: "sudp-echo".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+
+        for idx in 0..(SUDP_DIRECT_PENDING_LIMIT + 6) {
+            push_sudp_direct_pending(
+                &state,
+                &visitor,
+                session_id,
+                format!("payload-{idx}").as_bytes(),
+            )
+            .await;
+        }
+
+        let pending = state.sudp_direct_pending.lock().await;
+        let queue = pending.get(session_id).expect("pending queue should exist");
+        assert_eq!(queue.len(), SUDP_DIRECT_PENDING_LIMIT);
+        assert_eq!(queue.front().unwrap().content, b"payload-6");
+        assert_eq!(
+            queue.back().unwrap().content,
+            format!("payload-{}", SUDP_DIRECT_PENDING_LIMIT + 5).as_bytes()
+        );
     }
 
     #[tokio::test]
