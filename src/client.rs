@@ -3129,6 +3129,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn xtcp_direct_expired_failure_retries_nat_lookup() {
+        let (state, mut server) = test_state();
+        state.xtcp_direct_failures.lock().await.insert(
+            "expired-bad-xtcp".to_string(),
+            Instant::now() - XTCP_DIRECT_FAILURE_TTL - Duration::from_millis(1),
+        );
+        let visitor = VisitorConfig {
+            name: "local-expired-bad-xtcp".to_string(),
+            visitor_type: ProxyType::Xtcp,
+            server_name: "expired-bad-xtcp".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+        let (_client, mut inbound) = tcp_pair().await;
+        let request_state = state.clone();
+        let request = tokio::spawn(async move {
+            try_xtcp_direct_visitor(&request_state, &visitor, &mut inbound).await
+        });
+
+        match time::timeout(Duration::from_secs(1), read_msg(&mut server))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Message::NatHoleRegister {
+                transaction_id,
+                proxy_name,
+                role,
+                ..
+            } => {
+                assert_eq!(transaction_id, "expired-bad-xtcp");
+                assert_eq!(proxy_name, "expired-bad-xtcp");
+                assert_eq!(role, "visitor");
+            }
+            other => panic!("unexpected nat hole register: {other:?}"),
+        }
+
+        handle_nat_hole_response(
+            &state,
+            "expired-bad-xtcp".to_string(),
+            "expired-bad-xtcp".to_string(),
+            "visitor".to_string(),
+            NatHoleResponse {
+                peer_observed_addr: String::new(),
+                peer_local_addrs: Vec::new(),
+                waiting: true,
+                error: String::new(),
+            },
+        )
+        .await;
+
+        assert!(!request.await.unwrap().unwrap());
+        assert!(!state
+            .xtcp_direct_failures
+            .lock()
+            .await
+            .contains_key("expired-bad-xtcp"));
+    }
+
+    #[tokio::test]
     async fn xtcp_direct_owner_rejects_when_local_service_unavailable() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let missing_port = listener.local_addr().unwrap().port();
