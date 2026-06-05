@@ -26,6 +26,7 @@ use tracing::{debug, error, info, warn};
 
 const DIRECT_SUDP_MAGIC: &str = "frprs-sudp-direct-v1";
 const NAT_HOLE_CACHED_RESPONSE_TTL: Duration = Duration::from_secs(30);
+const NAT_HOLE_WAITING_RETRY_TTL: Duration = Duration::from_secs(1);
 const NAT_HOLE_OWNER_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 const XTCP_DIRECT_FAILURE_TTL: Duration = Duration::from_secs(5);
 const SUDP_DIRECT_FAILURE_TTL: Duration = Duration::from_secs(5);
@@ -48,6 +49,7 @@ struct ClientState {
     sudp_direct_failures: Arc<Mutex<HashMap<String, Instant>>>,
     nat_hole_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<NatHoleResponse>>>>,
     nat_hole_cached: Arc<Mutex<HashMap<String, NatHoleCachedResponse>>>,
+    nat_hole_waiting: Arc<Mutex<HashMap<String, Instant>>>,
     xtcp_direct_failures: Arc<Mutex<HashMap<String, Instant>>>,
     writer: Arc<Mutex<WriteHalf<BoxStream>>>,
     quic_session: Option<Arc<transports::quic::QuicClientSession>>,
@@ -218,6 +220,7 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
         sudp_direct_failures: Arc::new(Mutex::new(HashMap::new())),
         nat_hole_waiters: Arc::new(Mutex::new(HashMap::new())),
         nat_hole_cached: Arc::new(Mutex::new(HashMap::new())),
+        nat_hole_waiting: Arc::new(Mutex::new(HashMap::new())),
         xtcp_direct_failures: Arc::new(Mutex::new(HashMap::new())),
         writer: Arc::new(Mutex::new(writer)),
         quic_session: session.quic_session,
@@ -556,7 +559,17 @@ async fn request_nat_hole(
         if !resp.error.is_empty() {
             bail!("nat hole register failed: {}", resp.error);
         }
+        clear_nat_hole_waiting(state, &key).await;
         return Ok(resp);
+    }
+    if should_skip_nat_hole_waiting(state, &key).await {
+        debug!("skip nat hole register for {key} after recent waiting response");
+        return Ok(NatHoleResponse {
+            peer_observed_addr: String::new(),
+            peer_local_addrs: Vec::new(),
+            waiting: true,
+            error: String::new(),
+        });
     }
 
     let (tx, rx) = oneshot::channel();
@@ -582,7 +595,13 @@ async fn request_nat_hole(
         }
     };
     if !resp.error.is_empty() {
+        clear_nat_hole_waiting(state, &key).await;
         bail!("nat hole register failed: {}", resp.error);
+    }
+    if resp.waiting {
+        mark_nat_hole_waiting(state, &key).await;
+    } else {
+        clear_nat_hole_waiting(state, &key).await;
     }
     Ok(resp)
 }
@@ -605,6 +624,7 @@ async fn request_nat_hole_with_grace(
         if !resp.error.is_empty() {
             bail!("nat hole register failed: {}", resp.error);
         }
+        clear_nat_hole_waiting(state, &key).await;
         return Ok(resp);
     }
 
@@ -613,7 +633,13 @@ async fn request_nat_hole_with_grace(
     match time::timeout(grace, rx).await {
         Ok(Ok(resp)) => {
             if !resp.error.is_empty() {
+                clear_nat_hole_waiting(state, &key).await;
                 bail!("nat hole register failed: {}", resp.error);
+            }
+            if resp.waiting {
+                mark_nat_hole_waiting(state, &key).await;
+            } else {
+                clear_nat_hole_waiting(state, &key).await;
             }
             Ok(resp)
         }
@@ -626,6 +652,30 @@ async fn request_nat_hole_with_grace(
             Ok(resp)
         }
     }
+}
+
+async fn should_skip_nat_hole_waiting(state: &ClientState, key: &str) -> bool {
+    let mut waiting = state.nat_hole_waiting.lock().await;
+    let Some(waiting_at) = waiting.get(key).copied() else {
+        return false;
+    };
+    if waiting_at.elapsed() <= NAT_HOLE_WAITING_RETRY_TTL {
+        return true;
+    }
+    waiting.remove(key);
+    false
+}
+
+async fn mark_nat_hole_waiting(state: &ClientState, key: &str) {
+    state
+        .nat_hole_waiting
+        .lock()
+        .await
+        .insert(key.to_string(), Instant::now());
+}
+
+async fn clear_nat_hole_waiting(state: &ClientState, key: &str) {
+    state.nat_hole_waiting.lock().await.remove(key);
 }
 
 async fn punch_sudp_owner_candidates(
@@ -2511,6 +2561,7 @@ mod tests {
             sudp_direct_failures: Arc::new(Mutex::new(HashMap::new())),
             nat_hole_waiters: Arc::new(Mutex::new(HashMap::new())),
             nat_hole_cached: Arc::new(Mutex::new(HashMap::new())),
+            nat_hole_waiting: Arc::new(Mutex::new(HashMap::new())),
             xtcp_direct_failures: Arc::new(Mutex::new(HashMap::new())),
             writer: Arc::new(Mutex::new(writer)),
             quic_session: None,
@@ -2771,6 +2822,111 @@ mod tests {
         assert!(!resp.waiting);
         assert_eq!(resp.peer_observed_addr, "127.0.0.1:7001");
         assert_eq!(resp.peer_local_addrs, vec!["10.0.0.10:10001"]);
+    }
+
+    #[tokio::test]
+    async fn request_nat_hole_recent_waiting_skips_duplicate_register() {
+        let (state, mut server) = test_state();
+        let request_state = state.clone();
+        let request = tokio::spawn(async move {
+            request_nat_hole(
+                &request_state,
+                "xtcp-waiting",
+                "xtcp-waiting",
+                "visitor",
+                Vec::new(),
+            )
+            .await
+        });
+
+        match time::timeout(Duration::from_secs(1), read_msg(&mut server))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Message::NatHoleRegister {
+                transaction_id,
+                proxy_name,
+                role,
+                ..
+            } => {
+                assert_eq!(transaction_id, "xtcp-waiting");
+                assert_eq!(proxy_name, "xtcp-waiting");
+                assert_eq!(role, "visitor");
+            }
+            other => panic!("unexpected nat hole register: {other:?}"),
+        }
+
+        handle_nat_hole_response(
+            &state,
+            "xtcp-waiting".to_string(),
+            "xtcp-waiting".to_string(),
+            "visitor".to_string(),
+            NatHoleResponse {
+                peer_observed_addr: String::new(),
+                peer_local_addrs: Vec::new(),
+                waiting: true,
+                error: String::new(),
+            },
+        )
+        .await;
+
+        let resp = request.await.unwrap().unwrap();
+        assert!(resp.waiting);
+        assert!(should_skip_nat_hole_waiting(&state, "xtcp-waiting|visitor").await);
+
+        let resp = request_nat_hole(
+            &state,
+            "xtcp-waiting",
+            "xtcp-waiting",
+            "visitor",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert!(resp.waiting);
+        match time::timeout(Duration::from_millis(200), read_msg(&mut server)).await {
+            Err(_) | Ok(Err(_)) => {}
+            Ok(Ok(other)) => panic!("recent waiting still sent NAT register: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn request_nat_hole_cached_match_bypasses_recent_waiting() {
+        let (state, mut server) = test_state();
+        let key = nat_hole_waiter_key("xtcp-waiting", "visitor");
+        mark_nat_hole_waiting(&state, &key).await;
+        state.nat_hole_cached.lock().await.insert(
+            key.clone(),
+            NatHoleCachedResponse {
+                resp: NatHoleResponse {
+                    peer_observed_addr: "127.0.0.1:7001".to_string(),
+                    peer_local_addrs: vec!["10.0.0.10:10001".to_string()],
+                    waiting: false,
+                    error: String::new(),
+                },
+                cached_at: Instant::now(),
+            },
+        );
+
+        let resp = request_nat_hole(
+            &state,
+            "xtcp-waiting",
+            "xtcp-waiting",
+            "visitor",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(!resp.waiting);
+        assert_eq!(resp.peer_observed_addr, "127.0.0.1:7001");
+        assert_eq!(resp.peer_local_addrs, vec!["10.0.0.10:10001"]);
+        assert!(!state.nat_hole_waiting.lock().await.contains_key(&key));
+        match time::timeout(Duration::from_millis(200), read_msg(&mut server)).await {
+            Err(_) | Ok(Err(_)) => {}
+            Ok(Ok(other)) => panic!("cached match still sent NAT register: {other:?}"),
+        }
     }
 
     #[tokio::test]
