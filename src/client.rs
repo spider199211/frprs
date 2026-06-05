@@ -1669,6 +1669,7 @@ fn schedule_sudp_direct_probe_retries(
                 .lock()
                 .await
                 .contains(&session_id)
+                || should_skip_sudp_direct(&state, &session_id).await
                 || state
                     .sudp_direct_visitor_peers
                     .lock()
@@ -3080,6 +3081,72 @@ mod tests {
             .insert(session_id.clone());
         let extra = time::timeout(Duration::from_millis(700), peer.recv_from(&mut buf)).await;
         assert!(extra.is_err(), "probe retries continued after confirmation");
+    }
+
+    #[tokio::test]
+    async fn sudp_direct_probe_retries_stop_after_recent_failure() {
+        let (state, _server) = test_state();
+        let session_id = "visitor|127.0.0.1:50002".to_string();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        state
+            .sudp_direct_visitor_sockets
+            .lock()
+            .await
+            .insert(session_id.clone(), socket);
+        state.sudp_direct_pending.lock().await.insert(
+            session_id.clone(),
+            VecDeque::from([sudp_direct_visitor_frame(
+                &VisitorConfig {
+                    name: "visitor".to_string(),
+                    visitor_type: ProxyType::Sudp,
+                    server_name: "sudp-echo".to_string(),
+                    bind_addr: "127.0.0.1".to_string(),
+                    bind_port: 0,
+                    sk: Some("secret".to_string()),
+                },
+                &session_id,
+                b"hello".to_vec(),
+                false,
+            )]),
+        );
+        mark_sudp_direct_failure(&state, &session_id).await;
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let visitor = VisitorConfig {
+            name: "visitor".to_string(),
+            visitor_type: ProxyType::Sudp,
+            server_name: "sudp-echo".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+
+        schedule_sudp_direct_probe_retries(
+            state.clone(),
+            visitor,
+            session_id.clone(),
+            vec![peer.local_addr().unwrap()],
+        );
+
+        let mut buf = vec![0_u8; 1024];
+        let retry = time::timeout(Duration::from_millis(700), peer.recv_from(&mut buf)).await;
+        assert!(
+            retry.is_err(),
+            "probe retry ignored recent failure cooldown"
+        );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if !state
+                .sudp_direct_probe_sessions
+                .lock()
+                .await
+                .contains(&session_id)
+            {
+                return;
+            }
+            time::sleep(Duration::from_millis(20)).await;
+        }
+
+        panic!("probe retry session was not cleaned up after recent failure");
     }
 
     #[test]
