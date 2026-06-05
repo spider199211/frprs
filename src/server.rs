@@ -25,6 +25,9 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+const UDP_PACKET_BATCH_LIMIT: usize = 32;
+const UDP_PACKET_BATCH_WAIT: Duration = Duration::from_millis(2);
+
 #[derive(Clone)]
 struct ServerState {
     cfg: Arc<ServerConfig>,
@@ -1388,22 +1391,28 @@ fn spawn_udp_packet_batcher(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(first) = packet_rx.recv().await {
-            let mut queued = Vec::with_capacity(32);
+            let mut queued = Vec::with_capacity(UDP_PACKET_BATCH_LIMIT);
             queued.push(first);
-            time::sleep(Duration::from_millis(2)).await;
-            while queued.len() < 32 {
+            time::sleep(UDP_PACKET_BATCH_WAIT).await;
+            while queued.len() < UDP_PACKET_BATCH_LIMIT {
                 let Ok(packet) = packet_rx.try_recv() else {
                     break;
                 };
                 queued.push(packet);
             }
 
+            let per_control_capacity = queued.len();
             let mut by_control: HashMap<String, (Arc<Control>, Vec<UdpPacketFrame>)> =
-                HashMap::new();
+                HashMap::with_capacity(per_control_capacity);
             for queued_packet in queued {
                 let entry = by_control
                     .entry(queued_packet.control.run_id.clone())
-                    .or_insert_with(|| (queued_packet.control.clone(), Vec::new()));
+                    .or_insert_with(|| {
+                        (
+                            queued_packet.control.clone(),
+                            Vec::with_capacity(per_control_capacity),
+                        )
+                    });
                 entry.1.push(queued_packet.packet);
             }
 
@@ -1776,7 +1785,8 @@ async fn send_udp_packet_to_visitor(
 }
 
 async fn send_udp_packet_batch_to_visitors(state: ServerState, packets: Vec<UdpPacketFrame>) {
-    let mut destinations: HashMap<(String, String), (Arc<UdpSocket>, SocketAddr)> = HashMap::new();
+    let mut destinations: HashMap<(String, String), (Arc<UdpSocket>, SocketAddr)> =
+        HashMap::with_capacity(packets.len().min(UDP_PACKET_BATCH_LIMIT));
     let mut bytes_down = 0_u64;
 
     for packet in packets {

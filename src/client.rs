@@ -33,6 +33,8 @@ const XTCP_DIRECT_PEER_TTL: Duration = Duration::from_secs(30);
 const SUDP_DIRECT_FAILURE_TTL: Duration = Duration::from_secs(5);
 const SUDP_DIRECT_PEER_TTL: Duration = Duration::from_secs(30);
 const SUDP_DIRECT_PENDING_LIMIT: usize = 64;
+const UDP_PACKET_BATCH_LIMIT: usize = 32;
+const UDP_PACKET_BATCH_WAIT: Duration = Duration::from_millis(2);
 
 #[derive(Clone)]
 struct ClientState {
@@ -2408,7 +2410,8 @@ async fn udp_session_for_visitor(
 }
 
 async fn handle_udp_packet_batch(state: ClientState, packets: Vec<UdpPacketFrame>) -> Result<()> {
-    let mut sessions: HashMap<(String, String), (Arc<UdpSocket>, String)> = HashMap::new();
+    let mut sessions: HashMap<(String, String), (Arc<UdpSocket>, String)> =
+        HashMap::with_capacity(packets.len());
     for UdpPacketFrame {
         proxy_name,
         content,
@@ -2553,13 +2556,14 @@ fn spawn_udp_response_loop(state: ClientState, key: (String, String), socket: Ar
                 }
                 Err(_) => break,
             };
-            let mut packets = vec![UdpPacketFrame {
+            let mut packets = Vec::with_capacity(UDP_PACKET_BATCH_LIMIT);
+            packets.push(UdpPacketFrame {
                 proxy_name: key.0.clone(),
                 content: buf[..n].to_vec(),
                 visitor_addr: key.1.clone(),
-            }];
-            while packets.len() < 32 {
-                match time::timeout(Duration::from_millis(2), socket.recv_from(&mut buf)).await {
+            });
+            while packets.len() < UDP_PACKET_BATCH_LIMIT {
+                match time::timeout(UDP_PACKET_BATCH_WAIT, socket.recv_from(&mut buf)).await {
                     Ok(Ok((n, _))) => packets.push(UdpPacketFrame {
                         proxy_name: key.0.clone(),
                         content: buf[..n].to_vec(),
