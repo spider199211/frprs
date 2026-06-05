@@ -28,6 +28,7 @@ const DIRECT_SUDP_MAGIC: &str = "frprs-sudp-direct-v1";
 const NAT_HOLE_CACHED_RESPONSE_TTL: Duration = Duration::from_secs(30);
 const NAT_HOLE_OWNER_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 const XTCP_DIRECT_FAILURE_TTL: Duration = Duration::from_secs(5);
+const SUDP_DIRECT_FAILURE_TTL: Duration = Duration::from_secs(5);
 const SUDP_DIRECT_PEER_TTL: Duration = Duration::from_secs(30);
 const SUDP_DIRECT_PENDING_LIMIT: usize = 64;
 
@@ -44,6 +45,7 @@ struct ClientState {
     sudp_direct_pending: Arc<Mutex<HashMap<String, VecDeque<DirectSudpFrame>>>>,
     sudp_direct_confirmed: Arc<Mutex<HashSet<String>>>,
     sudp_direct_probe_sessions: Arc<Mutex<HashSet<String>>>,
+    sudp_direct_failures: Arc<Mutex<HashMap<String, Instant>>>,
     nat_hole_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<NatHoleResponse>>>>,
     nat_hole_cached: Arc<Mutex<HashMap<String, NatHoleCachedResponse>>>,
     xtcp_direct_failures: Arc<Mutex<HashMap<String, Instant>>>,
@@ -211,6 +213,7 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
         sudp_direct_pending: Arc::new(Mutex::new(HashMap::new())),
         sudp_direct_confirmed: Arc::new(Mutex::new(HashSet::new())),
         sudp_direct_probe_sessions: Arc::new(Mutex::new(HashSet::new())),
+        sudp_direct_failures: Arc::new(Mutex::new(HashMap::new())),
         nat_hole_waiters: Arc::new(Mutex::new(HashMap::new())),
         nat_hole_cached: Arc::new(Mutex::new(HashMap::new())),
         xtcp_direct_failures: Arc::new(Mutex::new(HashMap::new())),
@@ -1449,6 +1452,11 @@ async fn try_sudp_direct_visitor(
     session_id: &str,
     content: &[u8],
 ) -> Result<bool> {
+    if should_skip_sudp_direct(state, session_id).await {
+        debug!("skip sudp direct lookup for {session_id} after recent fallback");
+        return Ok(false);
+    }
+
     let direct_socket = sudp_direct_visitor_socket(state, session_id, &visitor.bind_addr).await?;
     if let Some(peer) = take_fresh_sudp_direct_peer(state, session_id).await {
         match send_sudp_direct_payload(&direct_socket, visitor, session_id, content, peer).await {
@@ -1519,6 +1527,30 @@ async fn try_sudp_direct_visitor(
         );
     }
     Ok(sent)
+}
+
+async fn should_skip_sudp_direct(state: &ClientState, session_id: &str) -> bool {
+    let mut failures = state.sudp_direct_failures.lock().await;
+    let Some(failed_at) = failures.get(session_id).copied() else {
+        return false;
+    };
+    if failed_at.elapsed() <= SUDP_DIRECT_FAILURE_TTL {
+        return true;
+    }
+    failures.remove(session_id);
+    false
+}
+
+async fn mark_sudp_direct_failure(state: &ClientState, session_id: &str) {
+    state
+        .sudp_direct_failures
+        .lock()
+        .await
+        .insert(session_id.to_string(), Instant::now());
+}
+
+async fn clear_sudp_direct_failure(state: &ClientState, session_id: &str) {
+    state.sudp_direct_failures.lock().await.remove(session_id);
 }
 
 async fn take_fresh_sudp_direct_peer(state: &ClientState, session_id: &str) -> Option<SocketAddr> {
@@ -1777,6 +1809,7 @@ fn spawn_sudp_direct_visitor_response_loop(
                     .lock()
                     .await
                     .insert(session_id.clone());
+                clear_sudp_direct_failure(&state, &session_id).await;
             }
             if let Some(content) = content {
                 if let Err(err) =
@@ -1808,6 +1841,7 @@ fn spawn_sudp_direct_visitor_response_loop(
             .lock()
             .await
             .remove(&session_id);
+        state.sudp_direct_failures.lock().await.remove(&session_id);
     });
 }
 
@@ -1857,6 +1891,7 @@ fn schedule_sudp_relay_fallback(
         {
             return;
         }
+        mark_sudp_direct_failure(&state, &session_id).await;
         if let Err(err) = state
             .send(&Message::SudpPacket {
                 proxy_name,
@@ -2422,6 +2457,7 @@ mod tests {
             sudp_direct_pending: Arc::new(Mutex::new(HashMap::new())),
             sudp_direct_confirmed: Arc::new(Mutex::new(HashSet::new())),
             sudp_direct_probe_sessions: Arc::new(Mutex::new(HashSet::new())),
+            sudp_direct_failures: Arc::new(Mutex::new(HashMap::new())),
             nat_hole_waiters: Arc::new(Mutex::new(HashMap::new())),
             nat_hole_cached: Arc::new(Mutex::new(HashMap::new())),
             xtcp_direct_failures: Arc::new(Mutex::new(HashMap::new())),
@@ -3322,6 +3358,7 @@ mod tests {
                 peer: peer.local_addr().unwrap(),
             },
         );
+        mark_sudp_direct_failure(&state, &session_id).await;
         spawn_sudp_direct_visitor_response_loop(state.clone(), session_id.clone(), socket);
 
         let response = DirectSudpFrame {
@@ -3346,6 +3383,11 @@ mod tests {
                 .await
                 .contains(&session_id)
             {
+                assert!(!state
+                    .sudp_direct_failures
+                    .lock()
+                    .await
+                    .contains_key(&session_id));
                 return;
             }
             time::sleep(Duration::from_millis(20)).await;
@@ -3538,10 +3580,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sudp_direct_recent_failure_skips_nat_lookup() {
+        let (state, mut server) = test_state();
+        let session_id = "local-sudp|127.0.0.1:50000".to_string();
+        mark_sudp_direct_failure(&state, &session_id).await;
+        let visitor = VisitorConfig {
+            name: "local-sudp".to_string(),
+            visitor_type: ProxyType::Sudp,
+            server_name: "sudp-echo".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+
+        let used_direct = try_sudp_direct_visitor(&state, &visitor, &session_id, b"hello")
+            .await
+            .unwrap();
+
+        assert!(!used_direct);
+        assert!(should_skip_sudp_direct(&state, &session_id).await);
+        match time::timeout(Duration::from_millis(200), read_msg(&mut server)).await {
+            Err(_) | Ok(Err(_)) => {}
+            Ok(Ok(other)) => panic!("recent sudp failure still performed NAT lookup: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sudp_direct_expired_failure_retries_nat_lookup() {
+        let (state, mut server) = test_state();
+        let session_id = "local-sudp|127.0.0.1:50000".to_string();
+        state.sudp_direct_failures.lock().await.insert(
+            session_id.clone(),
+            Instant::now() - SUDP_DIRECT_FAILURE_TTL - Duration::from_millis(1),
+        );
+        let visitor = VisitorConfig {
+            name: "local-sudp".to_string(),
+            visitor_type: ProxyType::Sudp,
+            server_name: "sudp-echo".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+
+        let request_state = state.clone();
+        let request_session_id = session_id.clone();
+        let request = tokio::spawn(async move {
+            try_sudp_direct_visitor(&request_state, &visitor, &request_session_id, b"hello").await
+        });
+
+        match time::timeout(Duration::from_secs(1), read_msg(&mut server))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Message::NatHoleRegister {
+                transaction_id,
+                proxy_name,
+                role,
+                local_addrs,
+            } => {
+                assert_eq!(transaction_id, "sudp-echo");
+                assert_eq!(proxy_name, "sudp-echo");
+                assert_eq!(role, "visitor");
+                assert_eq!(local_addrs.len(), 1);
+            }
+            other => panic!("unexpected nat hole register: {other:?}"),
+        }
+
+        handle_nat_hole_response(
+            &state,
+            "sudp-echo".to_string(),
+            "sudp-echo".to_string(),
+            "visitor".to_string(),
+            NatHoleResponse {
+                peer_observed_addr: String::new(),
+                peer_local_addrs: Vec::new(),
+                waiting: true,
+                error: String::new(),
+            },
+        )
+        .await;
+
+        let used_direct = request.await.unwrap().unwrap();
+        assert!(!used_direct);
+        assert!(!state
+            .sudp_direct_failures
+            .lock()
+            .await
+            .contains_key(&session_id));
+    }
+
+    #[tokio::test]
     async fn sudp_relay_fallback_sends_when_direct_unconfirmed() {
         let (state, mut server) = test_state();
         schedule_sudp_relay_fallback(
-            state,
+            state.clone(),
             "private-udp".to_string(),
             "session-1".to_string(),
             b"hello".to_vec(),
@@ -3568,6 +3701,7 @@ mod tests {
             }
             other => panic!("unexpected message: {other:?}"),
         }
+        assert!(should_skip_sudp_direct(&state, "session-1").await);
     }
 
     #[tokio::test]
