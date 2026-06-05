@@ -29,6 +29,7 @@ const NAT_HOLE_CACHED_RESPONSE_TTL: Duration = Duration::from_secs(30);
 const NAT_HOLE_WAITING_RETRY_TTL: Duration = Duration::from_secs(1);
 const NAT_HOLE_OWNER_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 const XTCP_DIRECT_FAILURE_TTL: Duration = Duration::from_secs(5);
+const XTCP_DIRECT_PEER_TTL: Duration = Duration::from_secs(30);
 const SUDP_DIRECT_FAILURE_TTL: Duration = Duration::from_secs(5);
 const SUDP_DIRECT_PEER_TTL: Duration = Duration::from_secs(30);
 const SUDP_DIRECT_PENDING_LIMIT: usize = 64;
@@ -51,6 +52,7 @@ struct ClientState {
     nat_hole_cached: Arc<Mutex<HashMap<String, NatHoleCachedResponse>>>,
     nat_hole_waiting: Arc<Mutex<HashMap<String, Instant>>>,
     xtcp_direct_failures: Arc<Mutex<HashMap<String, Instant>>>,
+    xtcp_direct_peers: Arc<Mutex<HashMap<String, XtcpDirectPeer>>>,
     writer: Arc<Mutex<WriteHalf<BoxStream>>>,
     quic_session: Option<Arc<transports::quic::QuicClientSession>>,
     tcp_mux_session: Option<Arc<transports::tcp_mux::MuxSession>>,
@@ -79,6 +81,12 @@ struct NatHoleCachedResponse {
 #[derive(Clone, Copy)]
 struct SudpDirectPeer {
     addr: SocketAddr,
+    updated_at: Instant,
+}
+
+#[derive(Clone)]
+struct XtcpDirectPeer {
+    candidate: String,
     updated_at: Instant,
 }
 
@@ -222,6 +230,7 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
         nat_hole_cached: Arc::new(Mutex::new(HashMap::new())),
         nat_hole_waiting: Arc::new(Mutex::new(HashMap::new())),
         xtcp_direct_failures: Arc::new(Mutex::new(HashMap::new())),
+        xtcp_direct_peers: Arc::new(Mutex::new(HashMap::new())),
         writer: Arc::new(Mutex::new(writer)),
         quic_session: session.quic_session,
         tcp_mux_session: session.tcp_mux_session,
@@ -1061,6 +1070,28 @@ async fn try_xtcp_direct_visitor(
         return Ok(false);
     }
 
+    if let Some(candidate) = take_fresh_xtcp_direct_peer(state, &visitor.server_name).await {
+        match connect_xtcp_direct_candidate_with_timeout(visitor, &candidate).await {
+            Ok(mut peer) => {
+                clear_xtcp_direct_failure(state, &visitor.server_name).await;
+                info!(
+                    "xtcp visitor {} reused direct peer {}",
+                    visitor.name, candidate
+                );
+                io::copy_bidirectional(inbound, &mut peer)
+                    .await
+                    .with_context(|| {
+                        format!("copy xtcp direct visitor bytes for {}", visitor.name)
+                    })?;
+                return Ok(true);
+            }
+            Err(err) => {
+                debug!("xtcp cached direct candidate {candidate} failed: {err:#}");
+                clear_xtcp_direct_peer(state, &visitor.server_name).await;
+            }
+        }
+    }
+
     let resp = match request_nat_hole_with_grace(
         state,
         &visitor.server_name,
@@ -1090,6 +1121,7 @@ async fn try_xtcp_direct_visitor(
         connect_xtcp_direct_peer(visitor, candidates.clone()).await?
     {
         clear_xtcp_direct_failure(state, &visitor.server_name).await;
+        record_xtcp_direct_peer(state, &visitor.server_name, candidate.clone()).await;
         info!(
             "xtcp visitor {} connected directly to {}",
             visitor.name, candidate
@@ -1102,6 +1134,7 @@ async fn try_xtcp_direct_visitor(
 
     if !candidates.is_empty() {
         mark_xtcp_direct_failure(state, &visitor.server_name).await;
+        clear_xtcp_direct_peer(state, &visitor.server_name).await;
     }
 
     Ok(false)
@@ -1131,6 +1164,30 @@ async fn clear_xtcp_direct_failure(state: &ClientState, server_name: &str) {
     state.xtcp_direct_failures.lock().await.remove(server_name);
 }
 
+async fn take_fresh_xtcp_direct_peer(state: &ClientState, server_name: &str) -> Option<String> {
+    let mut peers = state.xtcp_direct_peers.lock().await;
+    let peer = peers.get(server_name).cloned()?;
+    if peer.updated_at.elapsed() <= XTCP_DIRECT_PEER_TTL {
+        return Some(peer.candidate);
+    }
+    peers.remove(server_name);
+    None
+}
+
+async fn record_xtcp_direct_peer(state: &ClientState, server_name: &str, candidate: String) {
+    state.xtcp_direct_peers.lock().await.insert(
+        server_name.to_string(),
+        XtcpDirectPeer {
+            candidate,
+            updated_at: Instant::now(),
+        },
+    );
+}
+
+async fn clear_xtcp_direct_peer(state: &ClientState, server_name: &str) {
+    state.xtcp_direct_peers.lock().await.remove(server_name);
+}
+
 async fn connect_xtcp_direct_peer(
     visitor: &VisitorConfig,
     candidates: Vec<String>,
@@ -1144,12 +1201,7 @@ async fn connect_xtcp_direct_peer(
         let tx = tx.clone();
         let visitor = visitor.clone();
         tokio::spawn(async move {
-            let result = time::timeout(
-                Duration::from_secs(2),
-                connect_xtcp_direct_candidate(&visitor, &candidate),
-            )
-            .await
-            .unwrap_or_else(|_| Err(anyhow!("xtcp direct candidate timed out")));
+            let result = connect_xtcp_direct_candidate_with_timeout(&visitor, &candidate).await;
             let _ = tx.send((candidate, result)).await;
         });
     }
@@ -1162,6 +1214,18 @@ async fn connect_xtcp_direct_peer(
         }
     }
     Ok(None)
+}
+
+async fn connect_xtcp_direct_candidate_with_timeout(
+    visitor: &VisitorConfig,
+    candidate: &str,
+) -> Result<TcpStream> {
+    time::timeout(
+        Duration::from_secs(2),
+        connect_xtcp_direct_candidate(visitor, candidate),
+    )
+    .await
+    .unwrap_or_else(|_| Err(anyhow!("xtcp direct candidate timed out")))
 }
 
 async fn connect_xtcp_direct_candidate(
@@ -2565,6 +2629,7 @@ mod tests {
             nat_hole_cached: Arc::new(Mutex::new(HashMap::new())),
             nat_hole_waiting: Arc::new(Mutex::new(HashMap::new())),
             xtcp_direct_failures: Arc::new(Mutex::new(HashMap::new())),
+            xtcp_direct_peers: Arc::new(Mutex::new(HashMap::new())),
             writer: Arc::new(Mutex::new(writer)),
             quic_session: None,
             tcp_mux_session: None,
@@ -2594,6 +2659,66 @@ mod tests {
             }
         });
         (addr, task)
+    }
+
+    async fn spawn_xtcp_echo_direct_test_peer(
+        max_conns: usize,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let task = tokio::spawn(async move {
+            for _ in 0..max_conns {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                match read_msg(&mut stream).await.unwrap() {
+                    Message::NewVisitorConn { proxy_name, .. } => {
+                        write_msg(
+                            &mut stream,
+                            &Message::NewVisitorConnResp {
+                                proxy_name,
+                                error: String::new(),
+                            },
+                        )
+                        .await
+                        .unwrap();
+
+                        let mut buf = [0_u8; 1024];
+                        loop {
+                            let n = stream.read(&mut buf).await.unwrap();
+                            if n == 0 {
+                                break;
+                            }
+                            stream.write_all(&buf[..n]).await.unwrap();
+                        }
+                    }
+                    other => panic!("unexpected direct handshake: {other:?}"),
+                }
+            }
+        });
+        (addr, task)
+    }
+
+    async fn assert_xtcp_direct_echo(
+        state: ClientState,
+        visitor: VisitorConfig,
+        payload: &'static [u8],
+    ) -> bool {
+        let (mut client, mut inbound) = tcp_pair().await;
+        let direct =
+            tokio::spawn(
+                async move { try_xtcp_direct_visitor(&state, &visitor, &mut inbound).await },
+            );
+
+        client.write_all(payload).await.unwrap();
+        let mut echoed = vec![0_u8; payload.len()];
+        client.read_exact(&mut echoed).await.unwrap();
+        client.shutdown().await.unwrap();
+
+        assert_eq!(echoed, payload);
+        time::timeout(Duration::from_secs(1), direct)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
     }
 
     async fn spawn_rejecting_xtcp_direct_test_peer() -> (String, tokio::task::JoinHandle<()>) {
@@ -3412,6 +3537,52 @@ mod tests {
         );
         slow_task.abort();
         fast_task.abort();
+    }
+
+    #[tokio::test]
+    async fn xtcp_direct_cached_success_skips_nat_lookup() {
+        let (state, mut server) = test_state();
+        let (direct_addr, direct_task) = spawn_xtcp_echo_direct_test_peer(2).await;
+        state.nat_hole_cached.lock().await.insert(
+            nat_hole_waiter_key("cached-xtcp", "visitor"),
+            NatHoleCachedResponse {
+                resp: NatHoleResponse {
+                    peer_observed_addr: String::new(),
+                    peer_local_addrs: vec![direct_addr.clone()],
+                    waiting: false,
+                    error: String::new(),
+                },
+                cached_at: Instant::now(),
+            },
+        );
+        let visitor = VisitorConfig {
+            name: "local-cached-xtcp".to_string(),
+            visitor_type: ProxyType::Xtcp,
+            server_name: "cached-xtcp".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+
+        assert!(
+            assert_xtcp_direct_echo(state.clone(), visitor.clone(), b"first direct").await,
+            "first direct connection did not use NAT-provided candidate"
+        );
+        assert_eq!(
+            take_fresh_xtcp_direct_peer(&state, "cached-xtcp").await,
+            Some(direct_addr)
+        );
+        assert!(
+            assert_xtcp_direct_echo(state.clone(), visitor, b"second direct").await,
+            "second direct connection did not use cached candidate"
+        );
+
+        let register = time::timeout(Duration::from_millis(200), read_msg(&mut server)).await;
+        assert!(
+            register.is_err(),
+            "cached XTCP direct peer still performed NAT lookup"
+        );
+        direct_task.await.unwrap();
     }
 
     #[tokio::test]
