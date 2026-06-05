@@ -1167,6 +1167,10 @@ fn direct_candidates(resp: &NatHoleResponse) -> Vec<String> {
             debug!("ignore invalid direct candidate {candidate}");
             continue;
         };
+        if !is_usable_direct_candidate(&addr) {
+            debug!("ignore unusable direct candidate {candidate}");
+            continue;
+        }
         if seen.insert(addr) {
             candidates.push((direct_candidate_rank(source, &addr), candidate.clone()));
         }
@@ -1180,6 +1184,16 @@ fn direct_candidates(resp: &NatHoleResponse) -> Vec<String> {
 
 fn direct_candidate_rank(source: DirectCandidateSource, addr: &SocketAddr) -> (u8, u8) {
     (source as u8, direct_candidate_addr_rank(addr.ip()))
+}
+
+fn is_usable_direct_candidate(addr: &SocketAddr) -> bool {
+    if addr.port() == 0 {
+        return false;
+    }
+    match addr.ip() {
+        IpAddr::V4(ip) => !(ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast()),
+        IpAddr::V6(ip) => !(ip.is_unspecified() || ip.is_multicast()),
+    }
 }
 
 fn direct_candidate_addr_rank(ip: IpAddr) -> u8 {
@@ -3085,6 +3099,26 @@ mod tests {
             direct_candidates(&resp),
             vec!["127.0.0.1:7000".to_string(), "127.0.0.1:9000".to_string()]
         );
+    }
+
+    #[test]
+    fn direct_candidates_filters_unusable_addrs() {
+        let resp = NatHoleResponse {
+            peer_observed_addr: "0.0.0.0:9000".to_string(),
+            peer_local_addrs: vec![
+                "0.0.0.0:7000".to_string(),
+                "127.0.0.1:0".to_string(),
+                "224.0.0.1:7000".to_string(),
+                "255.255.255.255:7000".to_string(),
+                "[::]:7000".to_string(),
+                "[ff02::1]:7000".to_string(),
+                "127.0.0.1:7000".to_string(),
+            ],
+            waiting: false,
+            error: String::new(),
+        };
+
+        assert_eq!(direct_candidates(&resp), vec!["127.0.0.1:7000"]);
     }
 
     #[test]
