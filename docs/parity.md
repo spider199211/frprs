@@ -18,7 +18,7 @@ This file tracks the Rust rewrite against the upstream `fatedier/frp` feature su
 | Plugins | Implemented | Server-side plain HTTP hooks for login, new-proxy, TCP/UDP/SUDP/HTTP/HTTPS/TCPMUX new-user-connection, and close-proxy events; client-side local-connect hook covers TCP/UDP/SUDP. |
 | TCPMux HTTP CONNECT | Implemented | HTTP CONNECT parser, domain routing, and grouped mux listeners are implemented. |
 | STCP / SUDP | Implemented | STCP and SUDP have visitor config, `sk` auth, local visitor listeners, group load balancing, and end-to-end forwarding. |
-| XTCP / P2P | Implemented | NAT controller, multiple peers per transaction with per-peer expiry and disconnect pruning, candidate exchange, TTL-capped async notifications, periodic owner candidate refresh, short TTL deduplication for repeated waiting lookups, unusable direct-candidate filtering, reachability-first candidate preference, XTCP direct data plane with candidate racing, owner local-service validation, and short TTL failure skip, SUDP direct data plane, bounded pending queue, probing/retry with failure suppression, owner punch retry, SUDP owner response peer refresh, TTL-capped response-confirmed SUDP direct peers, unconfirmed fallback, and short TTL failed-direct skip are implemented. Complex NAT scenarios still need broader validation and tuning. |
+| XTCP / P2P | Implemented | NAT controller, multiple peers per transaction with per-peer expiry and disconnect pruning, candidate exchange, TTL-capped async notifications, periodic owner candidate refresh, short TTL deduplication for repeated waiting lookups, unusable direct-candidate filtering, reachability-first candidate preference, XTCP direct data plane with candidate racing, owner local-service validation, and short TTL failure skip, SUDP direct data plane, bounded pending queue, fallback pending cleanup, probing/retry with failure suppression, owner punch retry, SUDP owner response peer refresh, TTL-capped response-confirmed SUDP direct peers, unconfirmed fallback, and short TTL failed-direct skip are implemented. Complex NAT scenarios still need broader validation and tuning. |
 | TLS transport | Implemented | Uses rustls for control/work connections and has end-to-end proxy coverage. |
 | WebSocket transport | Implemented | Uses HTTP upgrade transport and has end-to-end proxy coverage. |
 | QUIC transport | Implemented | Uses `quinn` for control/work connections, reuses one client connection for multiple bidirectional streams, and has end-to-end proxy coverage. Current client uses self-signed/insecure verification for local deployment. |
@@ -44,7 +44,7 @@ Current tested flows:
 - TCP proxy with pooled work connections and TCP stream mux transport coverage.
 - STCP visitor forwarding through a local visitor listener.
 - STCP, XTCP, UDP, HTTP, HTTPS, TCPMUX, and SUDP group load balancing.
-- SUDP visitor forwarding by relay and direct data path with stale peer re-probing and owner response peer refresh.
+- SUDP visitor forwarding by relay and direct data path with stale peer re-probing, fallback pending cleanup, and owner response peer refresh.
 - Server and client plugin hooks for TCP/UDP/SUDP plus HTTP-family proxy events.
 - TCP proxy over TLS and WebSocket transports.
 - TCP proxy over KCP transport.

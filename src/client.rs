@@ -1996,7 +1996,7 @@ fn schedule_sudp_relay_fallback(
         if let Err(err) = state
             .send(&Message::SudpPacket {
                 proxy_name,
-                session_id,
+                session_id: session_id.clone(),
                 content,
                 sk,
                 from_visitor: true,
@@ -2004,6 +2004,8 @@ fn schedule_sudp_relay_fallback(
             .await
         {
             debug!("sudp relay fallback send failed: {err:#}");
+        } else {
+            state.sudp_direct_pending.lock().await.remove(&session_id);
         }
     });
 }
@@ -3982,10 +3984,34 @@ mod tests {
     #[tokio::test]
     async fn sudp_relay_fallback_sends_when_direct_unconfirmed() {
         let (state, mut server) = test_state();
+        let session_id = "session-1".to_string();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let socket_addr = socket.local_addr().unwrap();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        state
+            .sudp_direct_pending
+            .lock()
+            .await
+            .entry(session_id.clone())
+            .or_default()
+            .push_back(sudp_direct_visitor_frame(
+                &VisitorConfig {
+                    name: "visitor".to_string(),
+                    visitor_type: ProxyType::Sudp,
+                    server_name: "private-udp".to_string(),
+                    bind_addr: "127.0.0.1".to_string(),
+                    bind_port: 0,
+                    sk: Some("secret".to_string()),
+                },
+                &session_id,
+                b"hello".to_vec(),
+                false,
+            ));
+        spawn_sudp_direct_visitor_response_loop(state.clone(), session_id.clone(), socket);
         schedule_sudp_relay_fallback(
             state.clone(),
             "private-udp".to_string(),
-            "session-1".to_string(),
+            session_id.clone(),
             b"hello".to_vec(),
             Some("secret".to_string()),
         );
@@ -3997,20 +4023,45 @@ mod tests {
         {
             Message::SudpPacket {
                 proxy_name,
-                session_id,
+                session_id: got_session_id,
                 content,
                 sk,
                 from_visitor,
             } => {
                 assert_eq!(proxy_name, "private-udp");
-                assert_eq!(session_id, "session-1");
+                assert_eq!(got_session_id, session_id);
                 assert_eq!(content, b"hello");
                 assert_eq!(sk.as_deref(), Some("secret"));
                 assert!(from_visitor);
             }
             other => panic!("unexpected message: {other:?}"),
         }
-        assert!(should_skip_sudp_direct(&state, "session-1").await);
+        assert!(should_skip_sudp_direct(&state, &session_id).await);
+        assert!(!state
+            .sudp_direct_pending
+            .lock()
+            .await
+            .contains_key(&session_id));
+
+        let ack = DirectSudpFrame {
+            magic: DIRECT_SUDP_MAGIC.to_string(),
+            proxy_name: "private-udp".to_string(),
+            session_id: session_id.clone(),
+            content: Vec::new(),
+            sk: None,
+            from_visitor: false,
+            ack: true,
+            probe: false,
+        };
+        peer.send_to(&serde_json::to_vec(&ack).unwrap(), socket_addr)
+            .await
+            .unwrap();
+        let mut buf = vec![0_u8; 1024];
+        let late_direct = time::timeout(Duration::from_millis(300), peer.recv_from(&mut buf)).await;
+        assert!(
+            late_direct.is_err(),
+            "late direct ack flushed payload already sent by relay fallback"
+        );
     }
 
     #[tokio::test]
