@@ -1197,19 +1197,26 @@ async fn connect_xtcp_direct_peer(
     }
 
     let (tx, mut rx) = mpsc::channel(candidates.len());
+    let mut handles = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let tx = tx.clone();
         let visitor = visitor.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let result = connect_xtcp_direct_candidate_with_timeout(&visitor, &candidate).await;
             let _ = tx.send((candidate, result)).await;
         });
+        handles.push(handle);
     }
     drop(tx);
 
     while let Some((candidate, result)) = rx.recv().await {
         match result {
-            Ok(peer) => return Ok(Some((peer, candidate))),
+            Ok(peer) => {
+                for handle in handles {
+                    handle.abort();
+                }
+                return Ok(Some((peer, candidate)));
+            }
             Err(err) => debug!("xtcp direct candidate {candidate} failed: {err:#}"),
         }
     }
@@ -2599,6 +2606,8 @@ mod tests {
     use crate::config::{AuthConfig, ClientPluginConfig, TransportConfig};
     use tokio::io::duplex;
 
+    type XtcpHangingPeer = (String, oneshot::Receiver<()>, tokio::task::JoinHandle<()>);
+
     fn test_state() -> (ClientState, tokio::io::DuplexStream) {
         let (client, server) = duplex(4096);
         let stream: BoxStream = Box::new(client);
@@ -2659,6 +2668,28 @@ mod tests {
             }
         });
         (addr, task)
+    }
+
+    async fn spawn_hanging_xtcp_direct_test_peer() -> XtcpHangingPeer {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (closed_tx, closed_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            match read_msg(&mut stream).await.unwrap() {
+                Message::NewVisitorConn { .. } => {
+                    let mut buf = [0_u8; 1];
+                    match stream.read(&mut buf).await {
+                        Ok(0) | Err(_) => {
+                            let _ = closed_tx.send(());
+                        }
+                        Ok(_) => {}
+                    }
+                }
+                other => panic!("unexpected direct handshake: {other:?}"),
+            }
+        });
+        (addr, closed_rx, task)
     }
 
     async fn spawn_xtcp_echo_direct_test_peer(
@@ -3535,6 +3566,34 @@ mod tests {
             start.elapsed() < Duration::from_millis(500),
             "candidate racing waited for slow candidate"
         );
+        slow_task.abort();
+        fast_task.abort();
+    }
+
+    #[tokio::test]
+    async fn xtcp_direct_candidate_race_aborts_slower_candidates() {
+        let (slow_addr, slow_closed, slow_task) = spawn_hanging_xtcp_direct_test_peer().await;
+        let (fast_addr, fast_task) = spawn_xtcp_direct_test_peer(Duration::from_millis(200)).await;
+        let visitor = VisitorConfig {
+            name: "visitor".to_string(),
+            visitor_type: ProxyType::Xtcp,
+            server_name: "xtcp-echo".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+
+        let (_peer, candidate) =
+            connect_xtcp_direct_peer(&visitor, vec![slow_addr.clone(), fast_addr.clone()])
+                .await
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(candidate, fast_addr);
+        time::timeout(Duration::from_millis(500), slow_closed)
+            .await
+            .expect("slow candidate was not aborted after fast candidate won")
+            .unwrap();
         slow_task.abort();
         fast_task.abort();
     }
