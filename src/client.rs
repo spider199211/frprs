@@ -407,12 +407,7 @@ async fn connect_control(cfg: &ClientConfig) -> Result<BoxStream> {
             Ok(Box::new(stream))
         }
         TransportProtocol::Tcpmux => {
-            let server_addr = cfg.server_addr();
-            let stream = TcpStream::connect(&server_addr)
-                .await
-                .with_context(|| format!("connect tcp mux frps at {server_addr}"))?;
-            configure_tcp_stream(&stream);
-            Ok(Box::new(stream))
+            bail!("tcp mux streams must be opened through the session multiplexer")
         }
         TransportProtocol::Tls => {
             let server_addr = resolve_server_addr(cfg).await?;
