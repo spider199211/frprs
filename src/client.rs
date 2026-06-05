@@ -1183,7 +1183,7 @@ fn direct_candidates(resp: &NatHoleResponse) -> Vec<String> {
 }
 
 fn direct_candidate_rank(source: DirectCandidateSource, addr: &SocketAddr) -> (u8, u8) {
-    (source as u8, direct_candidate_addr_rank(addr.ip()))
+    (direct_candidate_addr_rank(addr.ip()), source as u8)
 }
 
 fn is_usable_direct_candidate(addr: &SocketAddr) -> bool {
@@ -3138,10 +3138,25 @@ mod tests {
             direct_candidates(&resp),
             vec![
                 "8.8.8.8:7000".to_string(),
+                "8.8.4.4:9000".to_string(),
                 "10.0.0.2:7000".to_string(),
                 "127.0.0.1:7000".to_string(),
-                "8.8.4.4:9000".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn direct_candidates_prefer_observed_public_addr_over_private_local_addr() {
+        let resp = NatHoleResponse {
+            peer_observed_addr: "8.8.4.4:9000".to_string(),
+            peer_local_addrs: vec!["10.0.0.2:7000".to_string()],
+            waiting: false,
+            error: String::new(),
+        };
+
+        assert_eq!(
+            direct_candidates(&resp),
+            vec!["8.8.4.4:9000".to_string(), "10.0.0.2:7000".to_string()]
         );
     }
 
