@@ -50,6 +50,7 @@ struct ServerState {
     nathole: Arc<NatHoleController>,
     udp_relays: Arc<Mutex<HashMap<String, Arc<UdpSocket>>>>,
     datagram_user_sessions: Arc<Mutex<HashMap<(String, String), Instant>>>,
+    datagram_user_sessions_last_prune: Arc<Mutex<Instant>>,
     proxy_entries: Arc<Mutex<HashMap<String, ProxyEntry>>>,
     allow_ports: Arc<Mutex<Vec<String>>>,
     metrics: Arc<ServerMetrics>,
@@ -187,6 +188,7 @@ struct ServerMetrics {
 }
 
 const DATAGRAM_USER_SESSION_TTL: Duration = Duration::from_secs(60);
+const DATAGRAM_USER_SESSION_PRUNE_INTERVAL: Duration = Duration::from_secs(10);
 
 impl Control {
     async fn send(&self, msg: &Message) -> Result<()> {
@@ -286,6 +288,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         nathole: Arc::new(NatHoleController::default()),
         udp_relays: Arc::new(Mutex::new(HashMap::new())),
         datagram_user_sessions: Arc::new(Mutex::new(HashMap::new())),
+        datagram_user_sessions_last_prune: Arc::new(Mutex::new(Instant::now())),
         proxy_entries: Arc::new(Mutex::new(HashMap::new())),
         allow_ports: Arc::new(Mutex::new(allow_ports)),
         metrics: Arc::new(ServerMetrics {
@@ -1729,16 +1732,8 @@ async fn call_datagram_new_user_conn_hook(
     }
 
     let now = Instant::now();
-    let proxy_key = format!("{proxy_type}:{proxy_name}");
-    let session_key = (proxy_key, user_addr.to_string());
-    let should_call = {
-        let mut sessions = state.datagram_user_sessions.lock().await;
-        sessions
-            .retain(|_, updated_at| now.duration_since(*updated_at) <= DATAGRAM_USER_SESSION_TTL);
-        let should_call = !sessions.contains_key(&session_key);
-        sessions.insert(session_key.clone(), now);
-        should_call
-    };
+    let session_key = datagram_user_session_key(proxy_type, proxy_name, user_addr);
+    let should_call = record_datagram_user_session(state, &session_key, now).await;
     if !should_call {
         return Ok(());
     }
@@ -1763,6 +1758,42 @@ async fn call_datagram_new_user_conn_hook(
             .remove(&session_key);
     }
     result
+}
+
+fn datagram_user_session_key(
+    proxy_type: &str,
+    proxy_name: &str,
+    user_addr: &str,
+) -> (String, String) {
+    (format!("{proxy_type}:{proxy_name}"), user_addr.to_string())
+}
+
+async fn record_datagram_user_session(
+    state: &ServerState,
+    session_key: &(String, String),
+    now: Instant,
+) -> bool {
+    let should_prune = should_prune_datagram_user_sessions(state, now).await;
+    let mut sessions = state.datagram_user_sessions.lock().await;
+    if should_prune {
+        sessions
+            .retain(|_, updated_at| now.duration_since(*updated_at) <= DATAGRAM_USER_SESSION_TTL);
+    }
+    let should_call = !matches!(
+        sessions.get(session_key),
+        Some(updated_at) if now.duration_since(*updated_at) <= DATAGRAM_USER_SESSION_TTL
+    );
+    sessions.insert(session_key.clone(), now);
+    should_call
+}
+
+async fn should_prune_datagram_user_sessions(state: &ServerState, now: Instant) -> bool {
+    let mut last_prune = state.datagram_user_sessions_last_prune.lock().await;
+    if now.duration_since(*last_prune) < DATAGRAM_USER_SESSION_PRUNE_INTERVAL {
+        return false;
+    }
+    *last_prune = now;
+    true
 }
 
 async fn send_udp_packet_to_visitor(
@@ -4046,6 +4077,7 @@ mod tests {
             nathole: Arc::new(NatHoleController::default()),
             udp_relays: Arc::new(Mutex::new(HashMap::new())),
             datagram_user_sessions: Arc::new(Mutex::new(HashMap::new())),
+            datagram_user_sessions_last_prune: Arc::new(Mutex::new(Instant::now())),
             proxy_entries: Arc::new(Mutex::new(HashMap::new())),
             allow_ports: Arc::new(Mutex::new(Vec::new())),
             metrics: Arc::new(ServerMetrics {
@@ -4055,6 +4087,45 @@ mod tests {
                 bytes_down_total: AtomicU64::new(0),
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn datagram_user_session_pruning_is_throttled_but_ttl_is_exact() {
+        let state = test_server_state(Vec::new());
+        let now = Instant::now();
+        let expired_key = datagram_user_session_key("udp", "expired", "127.0.0.1:10000");
+        let fresh_key = datagram_user_session_key("udp", "fresh", "127.0.0.1:10001");
+        let current_key = datagram_user_session_key("udp", "current", "127.0.0.1:10002");
+        {
+            let mut sessions = state.datagram_user_sessions.lock().await;
+            sessions.insert(
+                expired_key.clone(),
+                now - DATAGRAM_USER_SESSION_TTL - Duration::from_secs(1),
+            );
+            sessions.insert(fresh_key.clone(), now);
+        }
+        *state.datagram_user_sessions_last_prune.lock().await =
+            now - DATAGRAM_USER_SESSION_PRUNE_INTERVAL - Duration::from_secs(1);
+
+        assert!(record_datagram_user_session(&state, &current_key, now).await);
+        {
+            let sessions = state.datagram_user_sessions.lock().await;
+            assert!(!sessions.contains_key(&expired_key));
+            assert!(sessions.contains_key(&fresh_key));
+            assert!(sessions.contains_key(&current_key));
+        }
+
+        assert!(
+            !record_datagram_user_session(&state, &current_key, now + Duration::from_secs(1)).await
+        );
+        assert!(
+            record_datagram_user_session(
+                &state,
+                &current_key,
+                now + DATAGRAM_USER_SESSION_TTL + Duration::from_secs(2)
+            )
+            .await
+        );
     }
 
     #[tokio::test]
