@@ -51,6 +51,7 @@ struct ClientState {
     xtcp_direct_failures: Arc<Mutex<HashMap<String, Instant>>>,
     writer: Arc<Mutex<WriteHalf<BoxStream>>>,
     quic_session: Option<Arc<transports::quic::QuicClientSession>>,
+    tcp_mux_session: Option<Arc<transports::tcp_mux::MuxSession>>,
 }
 
 #[derive(Clone)]
@@ -168,9 +169,10 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
     }
 
     let server_addr = cfg.server_addr();
-    let (mut stream, quic_session) = connect_session_control(&cfg)
+    let session = connect_session_control(&cfg)
         .await
         .with_context(|| format!("connect frps at {server_addr}"))?;
+    let mut stream = session.control_stream;
     info!("connected to frps at {server_addr}");
 
     let login = Message::Login {
@@ -218,7 +220,8 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
         nat_hole_cached: Arc::new(Mutex::new(HashMap::new())),
         xtcp_direct_failures: Arc::new(Mutex::new(HashMap::new())),
         writer: Arc::new(Mutex::new(writer)),
-        quic_session,
+        quic_session: session.quic_session,
+        tcp_mux_session: session.tcp_mux_session,
     };
 
     for proxy in state.proxies.values().cloned() {
@@ -403,6 +406,14 @@ async fn connect_control(cfg: &ClientConfig) -> Result<BoxStream> {
             configure_tcp_stream(&stream);
             Ok(Box::new(stream))
         }
+        TransportProtocol::Tcpmux => {
+            let server_addr = cfg.server_addr();
+            let stream = TcpStream::connect(&server_addr)
+                .await
+                .with_context(|| format!("connect tcp mux frps at {server_addr}"))?;
+            configure_tcp_stream(&stream);
+            Ok(Box::new(stream))
+        }
         TransportProtocol::Tls => {
             let server_addr = resolve_server_addr(cfg).await?;
             let stream = transports::tls::connect_insecure(server_addr).await?;
@@ -426,23 +437,53 @@ async fn connect_control(cfg: &ClientConfig) -> Result<BoxStream> {
     }
 }
 
-async fn connect_session_control(
-    cfg: &ClientConfig,
-) -> Result<(BoxStream, Option<Arc<transports::quic::QuicClientSession>>)> {
+struct SessionControl {
+    control_stream: BoxStream,
+    quic_session: Option<Arc<transports::quic::QuicClientSession>>,
+    tcp_mux_session: Option<Arc<transports::tcp_mux::MuxSession>>,
+}
+
+async fn connect_session_control(cfg: &ClientConfig) -> Result<SessionControl> {
     if cfg.transport.protocol == TransportProtocol::Quic {
         let server_addr = resolve_server_addr(cfg).await?;
         let session =
             Arc::new(transports::quic::QuicClientSession::connect_insecure(server_addr).await?);
         let stream = session.open_stream().await?;
-        return Ok((Box::new(stream), Some(session)));
+        return Ok(SessionControl {
+            control_stream: Box::new(stream),
+            quic_session: Some(session),
+            tcp_mux_session: None,
+        });
     }
 
-    Ok((connect_control(cfg).await?, None))
+    if cfg.transport.protocol == TransportProtocol::Tcpmux {
+        let server_addr = cfg.server_addr();
+        let stream = TcpStream::connect(&server_addr)
+            .await
+            .with_context(|| format!("connect tcp mux frps at {server_addr}"))?;
+        configure_tcp_stream(&stream);
+        let session = transports::tcp_mux::MuxSession::client(stream);
+        let control_stream = session.open_stream().await?;
+        return Ok(SessionControl {
+            control_stream,
+            quic_session: None,
+            tcp_mux_session: Some(session),
+        });
+    }
+
+    Ok(SessionControl {
+        control_stream: connect_control(cfg).await?,
+        quic_session: None,
+        tcp_mux_session: None,
+    })
 }
 
 async fn open_control_stream(state: &ClientState) -> Result<BoxStream> {
     if let Some(session) = &state.quic_session {
         return Ok(Box::new(session.open_stream().await?));
+    }
+    if let Some(session) = &state.tcp_mux_session {
+        return session.open_stream().await;
     }
 
     connect_control(&state.cfg).await
@@ -2463,6 +2504,7 @@ mod tests {
             xtcp_direct_failures: Arc::new(Mutex::new(HashMap::new())),
             writer: Arc::new(Mutex::new(writer)),
             quic_session: None,
+            tcp_mux_session: None,
         };
         (state, server)
     }

@@ -1,13 +1,51 @@
-use frprs::transports::{kcp, quic, tls, websocket};
+use frprs::transports::{kcp, quic, tcp_mux, tls, websocket};
 use std::net::SocketAddr;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     time::{timeout, Duration},
 };
 
 fn loopback_any_port() -> SocketAddr {
     "127.0.0.1:0".parse().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tcp_mux_session_reuses_connection_for_multiple_streams() {
+    let listener = TcpListener::bind(loopback_any_port()).await.unwrap();
+    let server_addr = listener.local_addr().unwrap();
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let session = tcp_mux::MuxSession::server(stream);
+        for expected in [b"first mux".as_slice(), b"second mux".as_slice()] {
+            let mut stream = timeout(Duration::from_secs(5), session.accept_stream())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut request = vec![0_u8; expected.len()];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, expected);
+            stream.write_all(b"ok").await.unwrap();
+            stream.flush().await.unwrap();
+        }
+    });
+
+    let stream = TcpStream::connect(server_addr).await.unwrap();
+    let session = tcp_mux::MuxSession::client(stream);
+    for payload in [b"first mux".as_slice(), b"second mux".as_slice()] {
+        let mut stream = session.open_stream().await.unwrap();
+        stream.write_all(payload).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut response = [0_u8; 2];
+        timeout(Duration::from_secs(5), stream.read_exact(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&response, b"ok");
+    }
+
+    server_task.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

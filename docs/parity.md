@@ -11,7 +11,7 @@ This file tracks the Rust rewrite against the upstream `fatedier/frp` feature su
 | UDP proxy | Implemented | Request/response forwarding, local NAT session reuse, bidirectional batching, grouped packet batching, batch destination caching, and groups are implemented. Deeper packet-path optimizations remain. |
 | HTTP proxy | Implemented | Routes by `Host`, wildcard domains, `locations`, header rewrite, Basic Auth, real IP headers, and groups. |
 | HTTPS proxy | Implemented | Routes by TLS SNI / `customDomains`, wildcard domains, `*` fallback, groups, and raw passthrough. |
-| Connection pool | Implemented | `poolCount` pre-opens work connections, coalesces replenishment, requests only immediate waiter demand, and reuses QUIC client sessions for control/work/visitor streams. |
+| Connection pool | Implemented | `poolCount` pre-opens work connections, coalesces replenishment, requests only immediate waiter demand, and reuses TCP stream mux/QUIC client sessions for control/work streams. |
 | Bandwidth limiting | Implemented | `bandwidthLimit` throttles TCP/HTTP/HTTPS stream copy. |
 | Hot reload | Implemented | `frpc` watches config mtime and reconnects when the file changes. |
 | Dashboard | Implemented | Built-in HTML status page plus clients, proxies, groups, status, and metrics JSON APIs. |
@@ -23,7 +23,7 @@ This file tracks the Rust rewrite against the upstream `fatedier/frp` feature su
 | WebSocket transport | Implemented | Uses HTTP upgrade transport and has end-to-end proxy coverage. |
 | QUIC transport | Implemented | Uses `quinn` for control/work connections, reuses one client connection for multiple bidirectional streams, and has end-to-end proxy coverage. Current client uses self-signed/insecure verification for local deployment. |
 | KCP transport | Implemented | Uses `tokio_kcp` for control/work connections and has end-to-end proxy coverage. |
-| TCP stream multiplexing | Not implemented | Candidate crate: `yamux`. |
+| TCP stream multiplexing | Implemented | `transport.protocol = "tcpmux"` opens multiple control/work virtual streams over one TCP connection. |
 | Load balancing / groups | Implemented | TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/XTCP/SUDP groups are implemented. |
 | Health checks | Implemented | TCP and HTTP checks report proxy health and can close unhealthy proxies. |
 | Allow ports | Implemented | Server-side remote port policy and runtime Admin API updates are implemented. |
@@ -41,7 +41,7 @@ Current tested flows:
 - TCP health check closing an unhealthy proxy listener.
 - Dashboard status JSON endpoint.
 - Dashboard admin close, metrics reset, and allowPorts update endpoints.
-- TCP proxy with pooled work connections.
+- TCP proxy with pooled work connections and TCP stream mux transport coverage.
 - STCP visitor forwarding through a local visitor listener.
 - STCP, XTCP, UDP, HTTP, HTTPS, TCPMUX, and SUDP group load balancing.
 - SUDP visitor forwarding by relay and direct data path with stale peer re-probing and owner response peer refresh.
@@ -49,6 +49,6 @@ Current tested flows:
 - TCP proxy over TLS and WebSocket transports.
 - TCP proxy over KCP transport.
 - TCP proxy over QUIC transport.
-- QUIC transport reusing one connection for multiple bidirectional streams.
+- TCP stream mux and QUIC transports reusing one connection for multiple bidirectional streams.
 - NAT hole controller candidate exchange, owner candidate refresh, stale peer expiry, disconnected peer pruning, XTCP failed-candidate skip, SUDP failed-direct skip, XTCP owner local-service validation, and stale client notification cache expiry.
 - Raw TLS, WebSocket, QUIC, and KCP transport round trips.

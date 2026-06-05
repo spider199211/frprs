@@ -90,6 +90,7 @@ impl Default for TransportConfig {
 #[serde(rename_all = "lowercase")]
 pub enum TransportProtocol {
     Tcp,
+    Tcpmux,
     Tls,
     Websocket,
     Quic,
@@ -253,6 +254,7 @@ fn default_transport_protocol() -> TransportProtocol {
 fn ensure_supported_transport(protocol: TransportProtocol) -> Result<()> {
     match protocol {
         TransportProtocol::Tcp
+        | TransportProtocol::Tcpmux
         | TransportProtocol::Tls
         | TransportProtocol::Websocket
         | TransportProtocol::Quic

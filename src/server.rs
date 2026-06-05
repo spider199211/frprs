@@ -321,6 +321,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
 
     match protocol {
         TransportProtocol::Tcp => run_tcp_control_listener(state).await,
+        TransportProtocol::Tcpmux => run_tcp_mux_control_listener(state).await,
         TransportProtocol::Tls => run_tls_control_listener(state).await,
         TransportProtocol::Websocket => run_websocket_control_listener(state).await,
         TransportProtocol::Kcp => run_kcp_control_listener(state).await,
@@ -344,6 +345,48 @@ async fn run_tcp_control_listener(state: ServerState) -> Result<()> {
         tokio::spawn(async move {
             if let Err(err) = handle_connection(state, Box::new(stream), peer).await {
                 debug!("connection {peer} closed: {err:#}");
+            }
+        });
+    }
+}
+
+async fn run_tcp_mux_control_listener(state: ServerState) -> Result<()> {
+    let listener = bind_tcp_listener(&state.cfg.control_addr())
+        .await
+        .with_context(|| {
+            format!(
+                "listen frps tcp mux control on {}",
+                state.cfg.control_addr()
+            )
+        })?;
+    let addr = listener
+        .local_addr()
+        .context("read frps tcp mux listener address")?;
+    info!("frps tcp mux control listening on {addr}");
+
+    loop {
+        let (stream, peer) = listener
+            .accept()
+            .await
+            .context("accept frps tcp mux connection")?;
+        configure_tcp_stream(&stream);
+        let mux = transports::tcp_mux::MuxSession::server(stream);
+        let state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                let stream = match mux.accept_stream().await {
+                    Ok(stream) => stream,
+                    Err(err) => {
+                        debug!("tcp mux connection {peer} stream accept stopped: {err:#}");
+                        break;
+                    }
+                };
+                let state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = handle_connection(state, stream, peer).await {
+                        debug!("tcp mux stream {peer} closed: {err:#}");
+                    }
+                });
             }
         });
     }

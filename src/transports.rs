@@ -14,6 +14,288 @@ impl<T> AsyncStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 
 pub type BoxStream = Box<dyn AsyncStream>;
 
+pub mod tcp_mux {
+    use super::*;
+    use std::{
+        collections::HashMap,
+        sync::{
+            atomic::{AtomicU32, Ordering},
+            Arc,
+        },
+    };
+    use tokio::{
+        io::{split, ReadHalf, WriteHalf},
+        sync::{mpsc, Mutex},
+    };
+
+    const FRAME_OPEN: u8 = 1;
+    const FRAME_DATA: u8 = 2;
+    const FRAME_CLOSE: u8 = 3;
+    const HEADER_LEN: usize = 9;
+    const MAX_FRAME_PAYLOAD: u32 = 16 * 1024 * 1024;
+    const STREAM_BUFFER: usize = 64 * 1024;
+
+    #[derive(Clone)]
+    pub struct MuxSession {
+        outgoing: mpsc::Sender<MuxFrame>,
+        streams: Arc<Mutex<HashMap<u32, mpsc::Sender<MuxIncoming>>>>,
+        incoming: Arc<Mutex<mpsc::Receiver<BoxStream>>>,
+        next_stream_id: Arc<AtomicU32>,
+    }
+
+    struct MuxFrame {
+        kind: u8,
+        stream_id: u32,
+        payload: Vec<u8>,
+    }
+
+    enum MuxIncoming {
+        Data(Vec<u8>),
+        Close,
+    }
+
+    impl MuxSession {
+        pub fn client<S>(stream: S) -> Arc<Self>
+        where
+            S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        {
+            Self::spawn(stream, 1)
+        }
+
+        pub fn server<S>(stream: S) -> Arc<Self>
+        where
+            S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        {
+            Self::spawn(stream, 2)
+        }
+
+        pub async fn open_stream(&self) -> Result<BoxStream> {
+            let stream_id = self.next_stream_id.fetch_add(2, Ordering::AcqRel);
+            let stream = self.register_stream(stream_id).await;
+            self.outgoing
+                .send(MuxFrame {
+                    kind: FRAME_OPEN,
+                    stream_id,
+                    payload: Vec::new(),
+                })
+                .await
+                .context("open tcp mux stream")?;
+            Ok(stream)
+        }
+
+        pub async fn accept_stream(&self) -> Result<BoxStream> {
+            self.incoming
+                .lock()
+                .await
+                .recv()
+                .await
+                .ok_or_else(|| anyhow!("tcp mux session closed"))
+        }
+
+        fn spawn<S>(stream: S, first_stream_id: u32) -> Arc<Self>
+        where
+            S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        {
+            let (reader, writer) = split(stream);
+            let (outgoing_tx, outgoing_rx) = mpsc::channel(1024);
+            let (incoming_tx, incoming_rx) = mpsc::channel(1024);
+            let session = Arc::new(Self {
+                outgoing: outgoing_tx,
+                streams: Arc::new(Mutex::new(HashMap::new())),
+                incoming: Arc::new(Mutex::new(incoming_rx)),
+                next_stream_id: Arc::new(AtomicU32::new(first_stream_id)),
+            });
+
+            tokio::spawn(write_loop(writer, outgoing_rx));
+            tokio::spawn(read_loop(
+                reader,
+                session.clone(),
+                incoming_tx,
+                first_stream_id,
+            ));
+            session
+        }
+
+        async fn register_stream(&self, stream_id: u32) -> BoxStream {
+            let (app_stream, mux_stream) = tokio::io::duplex(STREAM_BUFFER);
+            let (mut mux_reader, mut mux_writer) = split(mux_stream);
+            let (incoming_tx, mut incoming_rx) = mpsc::channel::<MuxIncoming>(1024);
+            self.streams.lock().await.insert(stream_id, incoming_tx);
+
+            let outgoing = self.outgoing.clone();
+            let streams = self.streams.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0_u8; 16 * 1024];
+                loop {
+                    match mux_reader.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if outgoing
+                                .send(MuxFrame {
+                                    kind: FRAME_DATA,
+                                    stream_id,
+                                    payload: buf[..n].to_vec(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let _ = outgoing
+                    .send(MuxFrame {
+                        kind: FRAME_CLOSE,
+                        stream_id,
+                        payload: Vec::new(),
+                    })
+                    .await;
+                streams.lock().await.remove(&stream_id);
+            });
+
+            let outgoing = self.outgoing.clone();
+            let streams = self.streams.clone();
+            tokio::spawn(async move {
+                while let Some(frame) = incoming_rx.recv().await {
+                    match frame {
+                        MuxIncoming::Data(payload) => {
+                            if mux_writer.write_all(&payload).await.is_err() {
+                                break;
+                            }
+                        }
+                        MuxIncoming::Close => break,
+                    }
+                }
+                let _ = mux_writer.shutdown().await;
+                let _ = outgoing
+                    .send(MuxFrame {
+                        kind: FRAME_CLOSE,
+                        stream_id,
+                        payload: Vec::new(),
+                    })
+                    .await;
+                streams.lock().await.remove(&stream_id);
+            });
+
+            Box::new(app_stream)
+        }
+    }
+
+    async fn read_loop<S>(
+        mut reader: ReadHalf<S>,
+        session: Arc<MuxSession>,
+        incoming_tx: mpsc::Sender<BoxStream>,
+        first_stream_id: u32,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        loop {
+            let frame = match read_frame(&mut reader).await {
+                Ok(Some(frame)) => frame,
+                Ok(None) | Err(_) => break,
+            };
+
+            match frame.kind {
+                FRAME_OPEN => {
+                    if !is_remote_stream_id(frame.stream_id, first_stream_id) {
+                        continue;
+                    }
+                    let stream = session.register_stream(frame.stream_id).await;
+                    if incoming_tx.send(stream).await.is_err() {
+                        break;
+                    }
+                }
+                FRAME_DATA => {
+                    let tx = { session.streams.lock().await.get(&frame.stream_id).cloned() };
+                    if let Some(tx) = tx {
+                        let _ = tx.send(MuxIncoming::Data(frame.payload)).await;
+                    }
+                }
+                FRAME_CLOSE => {
+                    let tx = session.streams.lock().await.remove(&frame.stream_id);
+                    if let Some(tx) = tx {
+                        let _ = tx.send(MuxIncoming::Close).await;
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+
+    async fn write_loop<S>(mut writer: WriteHalf<S>, mut outgoing_rx: mpsc::Receiver<MuxFrame>)
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        while let Some(frame) = outgoing_rx.recv().await {
+            if write_frame(&mut writer, frame).await.is_err() {
+                break;
+            }
+        }
+        let _ = writer.shutdown().await;
+    }
+
+    async fn read_frame<R>(reader: &mut R) -> Result<Option<MuxFrame>>
+    where
+        R: AsyncRead + Unpin,
+    {
+        let mut header = [0_u8; HEADER_LEN];
+        if reader.read_exact(&mut header).await.is_err() {
+            return Ok(None);
+        }
+        let kind = header[0];
+        let stream_id = u32::from_be_bytes([header[1], header[2], header[3], header[4]]);
+        let len = u32::from_be_bytes([header[5], header[6], header[7], header[8]]);
+        if len > MAX_FRAME_PAYLOAD {
+            return Err(anyhow!("tcp mux frame too large: {len} bytes"));
+        }
+        let mut payload = vec![0_u8; len as usize];
+        if len > 0 {
+            reader
+                .read_exact(&mut payload)
+                .await
+                .context("read tcp mux frame payload")?;
+        }
+        Ok(Some(MuxFrame {
+            kind,
+            stream_id,
+            payload,
+        }))
+    }
+
+    async fn write_frame<W>(writer: &mut W, frame: MuxFrame) -> Result<()>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        if frame.payload.len() > MAX_FRAME_PAYLOAD as usize {
+            return Err(anyhow!(
+                "tcp mux frame payload too large: {} bytes",
+                frame.payload.len()
+            ));
+        }
+        let mut header = [0_u8; HEADER_LEN];
+        header[0] = frame.kind;
+        header[1..5].copy_from_slice(&frame.stream_id.to_be_bytes());
+        header[5..9].copy_from_slice(&(frame.payload.len() as u32).to_be_bytes());
+        writer
+            .write_all(&header)
+            .await
+            .context("write tcp mux frame header")?;
+        if !frame.payload.is_empty() {
+            writer
+                .write_all(&frame.payload)
+                .await
+                .context("write tcp mux frame payload")?;
+        }
+        writer.flush().await.context("flush tcp mux frame")
+    }
+
+    fn is_remote_stream_id(stream_id: u32, first_local_stream_id: u32) -> bool {
+        stream_id % 2 != first_local_stream_id % 2
+    }
+}
+
 pub mod websocket {
     use super::*;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};

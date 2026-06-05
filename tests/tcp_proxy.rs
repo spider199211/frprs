@@ -1342,6 +1342,11 @@ async fn tcp_proxy_forwards_bytes_over_tls_transport() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tcp_proxy_forwards_bytes_over_tcpmux_transport() {
+    assert_tcp_proxy_forwards_with_transport(TransportProtocol::Tcpmux).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tcp_proxy_forwards_bytes_over_websocket_transport() {
     assert_tcp_proxy_forwards_with_transport(TransportProtocol::Websocket).await;
 }
