@@ -7,6 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+const NAT_HOLE_PEER_LIMIT_PER_ROLE: usize = 64;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NatHoleRole {
@@ -128,8 +130,18 @@ impl NatHoleController {
         }
 
         match peer.role {
-            NatHoleRole::Server => Self::upsert_peer(&mut session.servers, peer.clone(), now),
-            NatHoleRole::Visitor => Self::upsert_peer(&mut session.visitors, peer.clone(), now),
+            NatHoleRole::Server => Self::upsert_peer(
+                &mut session.servers,
+                &mut session.next_server,
+                peer.clone(),
+                now,
+            ),
+            NatHoleRole::Visitor => Self::upsert_peer(
+                &mut session.visitors,
+                &mut session.next_visitor,
+                peer.clone(),
+                now,
+            ),
         }
         session.updated_at = now;
 
@@ -186,7 +198,12 @@ impl NatHoleController {
         removed
     }
 
-    fn upsert_peer(peers: &mut Vec<NatHolePeerEntry>, peer: NatHolePeer, now: Instant) {
+    fn upsert_peer(
+        peers: &mut Vec<NatHolePeerEntry>,
+        next: &mut usize,
+        peer: NatHolePeer,
+        now: Instant,
+    ) {
         if let Some(existing) = peers
             .iter_mut()
             .find(|existing| existing.peer.run_id == peer.run_id)
@@ -194,11 +211,25 @@ impl NatHoleController {
             existing.peer = peer;
             existing.updated_at = now;
         } else {
+            if peers.len() >= NAT_HOLE_PEER_LIMIT_PER_ROLE {
+                if let Some(oldest_index) = peers
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, entry)| entry.updated_at)
+                    .map(|(index, _)| index)
+                {
+                    peers.remove(oldest_index);
+                    if *next > oldest_index {
+                        *next = (*next).saturating_sub(1);
+                    }
+                }
+            }
             peers.push(NatHolePeerEntry {
                 peer,
                 updated_at: now,
             });
         }
+        *next = (*next).min(peers.len());
     }
 
     fn remove_peers_by_run_id(peers: &mut Vec<NatHolePeerEntry>, run_id: &str) -> usize {
@@ -459,6 +490,150 @@ mod tests {
             }
             other => panic!("unexpected outcomes: {other:?}"),
         }
+    }
+
+    #[test]
+    fn bounds_peers_per_role_for_shared_transaction() {
+        let controller = NatHoleController::default();
+
+        for idx in 0..=NAT_HOLE_PEER_LIMIT_PER_ROLE {
+            assert_eq!(
+                controller
+                    .register(NatHolePeer {
+                        transaction_id: "tx-bounded".to_string(),
+                        proxy_name: "xtcp-group".to_string(),
+                        run_id: format!("owner-{idx}"),
+                        role: NatHoleRole::Server,
+                        observed_addr: addr(7000 + idx as u16),
+                        local_addrs: vec![addr(10000 + idx as u16)],
+                    })
+                    .unwrap(),
+                NatHoleOutcome::Waiting
+            );
+        }
+
+        {
+            let sessions = controller.sessions.lock().unwrap();
+            let session = sessions.get("tx-bounded").unwrap();
+            assert_eq!(session.servers.len(), NAT_HOLE_PEER_LIMIT_PER_ROLE);
+            assert!(!session
+                .servers
+                .iter()
+                .any(|entry| entry.peer.run_id == "owner-0"));
+            assert!(session.servers.iter().any(|entry| {
+                entry.peer.run_id == format!("owner-{NAT_HOLE_PEER_LIMIT_PER_ROLE}")
+            }));
+        }
+
+        assert_eq!(
+            controller
+                .register(NatHolePeer {
+                    transaction_id: "tx-bounded".to_string(),
+                    proxy_name: "xtcp-group".to_string(),
+                    run_id: "visitor".to_string(),
+                    role: NatHoleRole::Visitor,
+                    observed_addr: addr(8001),
+                    local_addrs: vec![addr(9001)],
+                })
+                .unwrap(),
+            NatHoleOutcome::Matched(NatHoleCandidate {
+                transaction_id: "tx-bounded".to_string(),
+                proxy_name: "xtcp-group".to_string(),
+                peer_run_id: "owner-1".to_string(),
+                peer_role: NatHoleRole::Server,
+                observed_addr: addr(7001),
+                local_addrs: vec![addr(10001)],
+            })
+        );
+
+        for idx in 0..=NAT_HOLE_PEER_LIMIT_PER_ROLE {
+            controller
+                .register(NatHolePeer {
+                    transaction_id: "tx-bounded".to_string(),
+                    proxy_name: "xtcp-group".to_string(),
+                    run_id: format!("visitor-{idx}"),
+                    role: NatHoleRole::Visitor,
+                    observed_addr: addr(11000 + idx as u16),
+                    local_addrs: vec![addr(12000 + idx as u16)],
+                })
+                .unwrap();
+        }
+
+        let sessions = controller.sessions.lock().unwrap();
+        let session = sessions.get("tx-bounded").unwrap();
+        assert_eq!(session.visitors.len(), NAT_HOLE_PEER_LIMIT_PER_ROLE);
+        assert!(!session
+            .visitors
+            .iter()
+            .any(|entry| entry.peer.run_id == "visitor-0"));
+        assert!(session.visitors.iter().any(|entry| {
+            entry.peer.run_id == format!("visitor-{NAT_HOLE_PEER_LIMIT_PER_ROLE}")
+        }));
+    }
+
+    #[test]
+    fn refreshing_existing_peer_does_not_evict_when_role_is_full() {
+        let controller = NatHoleController::default();
+
+        for idx in 0..NAT_HOLE_PEER_LIMIT_PER_ROLE {
+            controller
+                .register(NatHolePeer {
+                    transaction_id: "tx-refresh".to_string(),
+                    proxy_name: "xtcp-group".to_string(),
+                    run_id: format!("owner-{idx}"),
+                    role: NatHoleRole::Server,
+                    observed_addr: addr(7000 + idx as u16),
+                    local_addrs: vec![addr(10000 + idx as u16)],
+                })
+                .unwrap();
+        }
+
+        controller
+            .register(NatHolePeer {
+                transaction_id: "tx-refresh".to_string(),
+                proxy_name: "xtcp-group".to_string(),
+                run_id: "owner-0".to_string(),
+                role: NatHoleRole::Server,
+                observed_addr: addr(9000),
+                local_addrs: vec![addr(13000)],
+            })
+            .unwrap();
+
+        {
+            let sessions = controller.sessions.lock().unwrap();
+            let session = sessions.get("tx-refresh").unwrap();
+            assert_eq!(session.servers.len(), NAT_HOLE_PEER_LIMIT_PER_ROLE);
+            assert!(session.servers.iter().any(|entry| {
+                entry.peer.run_id == "owner-0" && entry.peer.observed_addr == addr(9000)
+            }));
+        }
+
+        controller
+            .register(NatHolePeer {
+                transaction_id: "tx-refresh".to_string(),
+                proxy_name: "xtcp-group".to_string(),
+                run_id: "owner-new".to_string(),
+                role: NatHoleRole::Server,
+                observed_addr: addr(9100),
+                local_addrs: vec![addr(13100)],
+            })
+            .unwrap();
+
+        let sessions = controller.sessions.lock().unwrap();
+        let session = sessions.get("tx-refresh").unwrap();
+        assert_eq!(session.servers.len(), NAT_HOLE_PEER_LIMIT_PER_ROLE);
+        assert!(session
+            .servers
+            .iter()
+            .any(|entry| entry.peer.run_id == "owner-0"));
+        assert!(!session
+            .servers
+            .iter()
+            .any(|entry| entry.peer.run_id == "owner-1"));
+        assert!(session
+            .servers
+            .iter()
+            .any(|entry| entry.peer.run_id == "owner-new"));
     }
 
     #[test]
