@@ -219,7 +219,7 @@ impl WorkPool {
         let _ = self
             .pending
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                Some(value.saturating_sub(1))
+                value.checked_sub(1)
             });
         self.notify.notify_one();
     }
@@ -261,7 +261,11 @@ impl WorkPool {
         let _ = self
             .pending
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                Some(value.saturating_sub(count))
+                if value == 0 {
+                    None
+                } else {
+                    Some(value.saturating_sub(count))
+                }
             });
     }
 }
