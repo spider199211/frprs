@@ -1544,8 +1544,8 @@ async fn start_sudp_direct_owner_listener(state: ClientState, proxy: ProxyConfig
             }
 
             let local = match sudp_direct_owner_session(
-                &proxy,
                 &frame.session_id,
+                &frame.proxy_name,
                 socket.clone(),
                 sessions.clone(),
                 peer,
@@ -1568,8 +1568,8 @@ async fn start_sudp_direct_owner_listener(state: ClientState, proxy: ProxyConfig
 }
 
 async fn sudp_direct_owner_session(
-    proxy: &ProxyConfig,
     session_id: &str,
+    response_proxy_name: &str,
     direct_socket: Arc<UdpSocket>,
     sessions: Arc<Mutex<HashMap<String, Arc<SudpDirectOwnerSession>>>>,
     peer: SocketAddr,
@@ -1595,7 +1595,7 @@ async fn sudp_direct_owner_session(
             });
             sessions_guard.insert(session_id.to_string(), session.clone());
             spawn_sudp_direct_owner_response_loop(
-                proxy.name.clone(),
+                response_proxy_name.to_string(),
                 session_id.to_string(),
                 session.clone(),
                 direct_socket,
@@ -1677,7 +1677,7 @@ async fn try_sudp_direct_visitor(
         return Ok(false);
     }
 
-    let direct_socket = sudp_direct_visitor_socket(state, session_id, &visitor.bind_addr).await?;
+    let direct_socket = sudp_direct_visitor_socket(state, visitor, session_id).await?;
     if let Some(peer) = take_fresh_sudp_direct_peer(state, session_id).await {
         match send_sudp_direct_payload(&direct_socket, visitor, session_id, content, peer).await {
             Ok(()) => {
@@ -1950,8 +1950,8 @@ async fn remove_sudp_pending_payload(state: &ClientState, session_id: &str, cont
 
 async fn sudp_direct_visitor_socket(
     state: &ClientState,
+    visitor: &VisitorConfig,
     session_id: &str,
-    bind_addr: &str,
 ) -> Result<Arc<UdpSocket>> {
     if let Some(socket) = state
         .sudp_direct_visitor_sockets
@@ -1964,7 +1964,7 @@ async fn sudp_direct_visitor_socket(
     }
 
     let socket = Arc::new(
-        UdpSocket::bind(format!("{bind_addr}:0"))
+        UdpSocket::bind(format!("{}:0", visitor.bind_addr))
             .await
             .context("bind sudp direct visitor socket")?,
     );
@@ -1977,6 +1977,7 @@ async fn sudp_direct_visitor_socket(
             spawn_sudp_direct_visitor_response_loop(
                 state.clone(),
                 session_id.to_string(),
+                visitor.server_name.clone(),
                 socket.clone(),
             );
             socket
@@ -1988,6 +1989,7 @@ async fn sudp_direct_visitor_socket(
 fn spawn_sudp_direct_visitor_response_loop(
     state: ClientState,
     session_id: String,
+    expected_proxy_name: String,
     socket: Arc<UdpSocket>,
 ) {
     tokio::spawn(async move {
@@ -2006,11 +2008,12 @@ fn spawn_sudp_direct_visitor_response_loop(
                 }
                 Err(_) => break,
             };
-            let Some((response_session_id, content, ack)) = parse_sudp_direct_response(&buf[..n])
+            let Some((proxy_name, response_session_id, content, ack)) =
+                parse_sudp_direct_response(&buf[..n])
             else {
                 continue;
             };
-            if response_session_id != session_id {
+            if response_session_id != session_id || proxy_name != expected_proxy_name {
                 continue;
             }
             state.sudp_direct_visitor_peers.lock().await.insert(
@@ -2130,13 +2133,13 @@ fn schedule_sudp_relay_fallback(
     });
 }
 
-fn parse_sudp_direct_response(data: &[u8]) -> Option<(String, Option<Vec<u8>>, bool)> {
+fn parse_sudp_direct_response(data: &[u8]) -> Option<(String, String, Option<Vec<u8>>, bool)> {
     let frame = parse_sudp_direct_frame(data)?;
     if frame.from_visitor {
         return None;
     }
     let content = if frame.ack { None } else { Some(frame.content) };
-    Some((frame.session_id, content, frame.ack))
+    Some((frame.proxy_name, frame.session_id, content, frame.ack))
 }
 
 fn parse_sudp_direct_frame(data: &[u8]) -> Option<DirectSudpFrame> {
@@ -3516,8 +3519,8 @@ mod tests {
         let peer_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
         let local_a = sudp_direct_owner_session(
-            &proxy,
             session_id,
+            &proxy.name,
             direct_socket.clone(),
             sessions.clone(),
             peer_a.local_addr().unwrap(),
@@ -3525,8 +3528,8 @@ mod tests {
         .await
         .unwrap();
         let local_b = sudp_direct_owner_session(
-            &proxy,
             session_id,
+            &proxy.name,
             direct_socket,
             sessions,
             peer_b.local_addr().unwrap(),
@@ -4063,7 +4066,12 @@ mod tests {
                 b"hello sudp".to_vec(),
                 false,
             ));
-        spawn_sudp_direct_visitor_response_loop(state.clone(), session_id.clone(), socket);
+        spawn_sudp_direct_visitor_response_loop(
+            state.clone(),
+            session_id.clone(),
+            visitor.server_name.clone(),
+            socket,
+        );
 
         let ack = DirectSudpFrame {
             magic: DIRECT_SUDP_MAGIC.to_string(),
@@ -4109,6 +4117,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sudp_direct_response_with_wrong_proxy_is_ignored() {
+        let (state, _server) = test_state();
+        let session_id = "visitor|127.0.0.1:50000".to_string();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let socket_addr = socket.local_addr().unwrap();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let visitor = VisitorConfig {
+            name: "visitor".to_string(),
+            visitor_type: ProxyType::Sudp,
+            server_name: "sudp-echo".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+        state
+            .sudp_direct_pending
+            .lock()
+            .await
+            .entry(session_id.clone())
+            .or_default()
+            .push_back(sudp_direct_visitor_frame(
+                &visitor,
+                &session_id,
+                b"hello sudp".to_vec(),
+                false,
+            ));
+        spawn_sudp_direct_visitor_response_loop(
+            state.clone(),
+            session_id.clone(),
+            visitor.server_name.clone(),
+            socket,
+        );
+
+        let wrong_proxy_ack = DirectSudpFrame {
+            magic: DIRECT_SUDP_MAGIC.to_string(),
+            proxy_name: "other-sudp".to_string(),
+            session_id: session_id.clone(),
+            content: Vec::new(),
+            sk: None,
+            from_visitor: false,
+            ack: true,
+            probe: false,
+        };
+        peer.send_to(&serde_json::to_vec(&wrong_proxy_ack).unwrap(), socket_addr)
+            .await
+            .unwrap();
+
+        assert!(
+            time::timeout(
+                Duration::from_millis(200),
+                peer.recv_from(&mut [0_u8; 1024])
+            )
+            .await
+            .is_err(),
+            "wrong-proxy ack flushed pending payload"
+        );
+        assert!(!state
+            .sudp_direct_confirmed
+            .lock()
+            .await
+            .contains(&session_id));
+        assert!(!state
+            .sudp_direct_visitor_peers
+            .lock()
+            .await
+            .contains_key(&session_id));
+        assert!(state
+            .sudp_direct_pending
+            .lock()
+            .await
+            .contains_key(&session_id));
+    }
+
+    #[tokio::test]
     async fn sudp_direct_data_response_confirms_selected_peer() {
         let (state, _server) = test_state();
         let session_id = "visitor|127.0.0.1:50000".to_string();
@@ -4124,7 +4206,12 @@ mod tests {
             },
         );
         mark_sudp_direct_failure(&state, &session_id).await;
-        spawn_sudp_direct_visitor_response_loop(state.clone(), session_id.clone(), socket);
+        spawn_sudp_direct_visitor_response_loop(
+            state.clone(),
+            session_id.clone(),
+            "sudp-echo".to_string(),
+            socket,
+        );
 
         let response = DirectSudpFrame {
             magic: DIRECT_SUDP_MAGIC.to_string(),
@@ -4201,7 +4288,12 @@ mod tests {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let socket_addr = socket.local_addr().unwrap();
         let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        spawn_sudp_direct_visitor_response_loop(state.clone(), session_id.clone(), socket);
+        spawn_sudp_direct_visitor_response_loop(
+            state.clone(),
+            session_id.clone(),
+            "sudp-echo".to_string(),
+            socket,
+        );
 
         let ack = DirectSudpFrame {
             magic: DIRECT_SUDP_MAGIC.to_string(),
@@ -4461,7 +4553,12 @@ mod tests {
                 b"hello".to_vec(),
                 false,
             ));
-        spawn_sudp_direct_visitor_response_loop(state.clone(), session_id.clone(), socket);
+        spawn_sudp_direct_visitor_response_loop(
+            state.clone(),
+            session_id.clone(),
+            "private-udp".to_string(),
+            socket,
+        );
         schedule_sudp_relay_fallback(
             state.clone(),
             "private-udp".to_string(),
