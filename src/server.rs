@@ -27,6 +27,7 @@ use uuid::Uuid;
 
 const UDP_PACKET_BATCH_LIMIT: usize = 32;
 const UDP_PACKET_BATCH_WAIT: Duration = Duration::from_millis(2);
+const NAT_HOLE_LOCAL_ADDR_LIMIT: usize = 16;
 
 #[derive(Clone)]
 struct ServerState {
@@ -4203,6 +4204,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nat_hole_register_rejects_too_many_local_addrs() {
+        let (owner_control, _owner_stream) = test_control_with_run_id("owner-run", 0);
+        let state = test_server_state(vec![owner_control.clone()]);
+        let local_addrs = (0..=NAT_HOLE_LOCAL_ADDR_LIMIT)
+            .map(|idx| format!("10.0.0.1:{}", 10000 + idx))
+            .collect::<Vec<_>>();
+
+        let resp = handle_nat_hole_register(
+            state.clone(),
+            owner_control,
+            "127.0.0.1:7001".parse().unwrap(),
+            "tx-too-many-addrs".to_string(),
+            "xtcp-ssh".to_string(),
+            "server".to_string(),
+            local_addrs,
+        )
+        .await;
+
+        match resp {
+            Message::NatHoleResp { error, waiting, .. } => {
+                assert!(!waiting);
+                assert!(error.contains("too many nat hole local addresses"));
+            }
+            other => panic!("unexpected nat hole response: {other:?}"),
+        }
+        assert!(state
+            .nathole
+            .candidate_for("tx-too-many-addrs", NatHoleRole::Visitor)
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn sudp_group_routes_visitor_packets_round_robin() {
         let (owner_a, mut owner_a_stream) = test_control_with_run_id("owner-a", 0);
         let (owner_b, mut owner_b_stream) = test_control_with_run_id("owner-b", 0);
@@ -4669,6 +4702,13 @@ fn nat_hole_role_name(role: NatHoleRole) -> &'static str {
 }
 
 fn parse_socket_addrs(values: &[String]) -> Result<Vec<SocketAddr>> {
+    if values.len() > NAT_HOLE_LOCAL_ADDR_LIMIT {
+        bail!(
+            "too many nat hole local addresses: {} > {}",
+            values.len(),
+            NAT_HOLE_LOCAL_ADDR_LIMIT
+        );
+    }
     values
         .iter()
         .map(|value| {
