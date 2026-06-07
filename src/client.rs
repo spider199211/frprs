@@ -30,6 +30,7 @@ const NAT_HOLE_CACHED_RESPONSE_LIMIT: usize = 256;
 const NAT_HOLE_WAITER_LIMIT: usize = 64;
 const NAT_HOLE_WAITING_RETRY_TTL: Duration = Duration::from_secs(1);
 const NAT_HOLE_OWNER_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+const DIRECT_CANDIDATE_LIMIT: usize = 8;
 const XTCP_DIRECT_FAILURE_TTL: Duration = Duration::from_secs(5);
 const XTCP_DIRECT_FAILURE_LIMIT: usize = 256;
 const XTCP_DIRECT_PEER_TTL: Duration = Duration::from_secs(30);
@@ -1397,6 +1398,7 @@ fn direct_candidates(resp: &NatHoleResponse) -> Vec<String> {
     candidates.sort_by_key(|(rank, _)| *rank);
     candidates
         .into_iter()
+        .take(DIRECT_CANDIDATE_LIMIT)
         .map(|(_, candidate)| candidate)
         .collect()
 }
@@ -3888,6 +3890,43 @@ mod tests {
             direct_candidates(&resp),
             vec!["8.8.4.4:9000".to_string(), "10.0.0.2:7000".to_string()]
         );
+    }
+
+    #[test]
+    fn direct_candidates_are_bounded_to_highest_ranked_addrs() {
+        let resp = NatHoleResponse {
+            peer_observed_addr: "8.8.4.4:9000".to_string(),
+            peer_local_addrs: vec![
+                "127.0.0.1:7000".to_string(),
+                "127.0.0.1:7001".to_string(),
+                "127.0.0.1:7002".to_string(),
+                "127.0.0.1:7003".to_string(),
+                "127.0.0.1:7004".to_string(),
+                "127.0.0.1:7005".to_string(),
+                "127.0.0.1:7006".to_string(),
+                "127.0.0.1:7007".to_string(),
+                "10.0.0.2:7000".to_string(),
+                "10.0.0.3:7000".to_string(),
+                "198.51.100.10:7000".to_string(),
+            ],
+            waiting: false,
+            error: String::new(),
+        };
+
+        let candidates = direct_candidates(&resp);
+
+        assert_eq!(candidates.len(), DIRECT_CANDIDATE_LIMIT);
+        assert_eq!(candidates[0], "8.8.4.4:9000");
+        assert!(candidates.contains(&"10.0.0.2:7000".to_string()));
+        assert!(candidates.contains(&"10.0.0.3:7000".to_string()));
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|candidate| candidate.starts_with("127.0.0.1:"))
+                .count(),
+            DIRECT_CANDIDATE_LIMIT - 3
+        );
+        assert!(!candidates.contains(&"198.51.100.10:7000".to_string()));
     }
 
     #[tokio::test]
