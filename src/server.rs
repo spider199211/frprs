@@ -18,7 +18,7 @@ use std::{
 use tokio::{
     io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf},
     net::{TcpListener, TcpSocket, TcpStream, UdpSocket},
-    sync::{mpsc, Mutex, Notify},
+    sync::{mpsc, mpsc::error::TrySendError, Mutex, Notify},
     task::JoinHandle,
     time,
 };
@@ -145,6 +145,24 @@ struct UdpGroupRoute {
 struct QueuedUdpPacket {
     control: Arc<Control>,
     packet: UdpPacketFrame,
+}
+
+fn try_queue_udp_packet(
+    queue_name: &str,
+    packet_tx: &mpsc::Sender<QueuedUdpPacket>,
+    packet: QueuedUdpPacket,
+) -> bool {
+    match packet_tx.try_send(packet) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) => {
+            debug!("{queue_name} packet batch queue full; dropping packet");
+            true
+        }
+        Err(TrySendError::Closed(_)) => {
+            warn!("{queue_name} packet batch queue closed");
+            false
+        }
+    }
 }
 
 struct UdpGroup {
@@ -1477,10 +1495,12 @@ async fn start_udp_proxy(
     let task_proxy_name = proxy_name.clone();
     let metrics = state.metrics.clone();
     let (packet_tx, packet_rx) = mpsc::channel::<QueuedUdpPacket>(128);
-    spawn_udp_packet_batcher(format!("udp proxy {proxy_name}"), packet_rx);
+    let packet_queue_name = format!("udp proxy {proxy_name}");
+    spawn_udp_packet_batcher(packet_queue_name.clone(), packet_rx);
     let task_state = state.clone();
     let task_control = control.clone();
     let task_remote_addr = remote_addr.clone();
+    let task_packet_queue_name = packet_queue_name.clone();
     let task = tokio::spawn(async move {
         let mut buf = vec![0_u8; 64 * 1024];
         loop {
@@ -1511,14 +1531,14 @@ async fn start_udp_proxy(
                         content: buf[..n].to_vec(),
                         visitor_addr,
                     };
-                    if let Err(err) = packet_tx
-                        .send(QueuedUdpPacket {
+                    if !try_queue_udp_packet(
+                        &task_packet_queue_name,
+                        &packet_tx,
+                        QueuedUdpPacket {
                             control: task_control.clone(),
                             packet,
-                        })
-                        .await
-                    {
-                        warn!("udp proxy {task_proxy_name} failed to queue packet batch: {err:#}");
+                        },
+                    ) {
                         break;
                     }
                 }
@@ -1612,7 +1632,9 @@ async fn start_udp_group_proxy(
             let task_remote_addr = remote_addr.clone();
             let metrics = state.metrics.clone();
             let (packet_tx, packet_rx) = mpsc::channel::<QueuedUdpPacket>(128);
-            spawn_udp_packet_batcher(format!("udp group {group}"), packet_rx);
+            let packet_queue_name = format!("udp group {group}");
+            spawn_udp_packet_batcher(packet_queue_name.clone(), packet_rx);
+            let task_packet_queue_name = packet_queue_name.clone();
             let task = tokio::spawn(async move {
                 let mut buf = vec![0_u8; 64 * 1024];
                 loop {
@@ -1657,17 +1679,14 @@ async fn start_udp_group_proxy(
                                 content: buf[..n].to_vec(),
                                 visitor_addr,
                             };
-                            if let Err(err) = packet_tx
-                                .send(QueuedUdpPacket {
+                            if !try_queue_udp_packet(
+                                &task_packet_queue_name,
+                                &packet_tx,
+                                QueuedUdpPacket {
                                     control: route.control.clone(),
                                     packet,
-                                })
-                                .await
-                            {
-                                warn!(
-                                    "udp group route {} failed to queue packet batch: {err:#}",
-                                    route.proxy_name
-                                );
+                                },
+                            ) {
                                 break;
                             }
                         }
@@ -4443,6 +4462,55 @@ mod tests {
 
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_packet_queue_drops_when_full_instead_of_waiting() {
+        let (control, _server) = test_control(0);
+        let (packet_tx, mut packet_rx) = mpsc::channel(1);
+
+        assert!(try_queue_udp_packet(
+            "test udp",
+            &packet_tx,
+            QueuedUdpPacket {
+                control: control.clone(),
+                packet: UdpPacketFrame {
+                    proxy_name: "udp-a".to_string(),
+                    content: b"first".to_vec(),
+                    visitor_addr: "127.0.0.1:10000".to_string(),
+                },
+            },
+        ));
+        assert!(try_queue_udp_packet(
+            "test udp",
+            &packet_tx,
+            QueuedUdpPacket {
+                control: control.clone(),
+                packet: UdpPacketFrame {
+                    proxy_name: "udp-a".to_string(),
+                    content: b"dropped".to_vec(),
+                    visitor_addr: "127.0.0.1:10001".to_string(),
+                },
+            },
+        ));
+
+        let queued = packet_rx.try_recv().unwrap();
+        assert_eq!(queued.packet.content, b"first");
+        assert!(packet_rx.try_recv().is_err());
+
+        drop(packet_rx);
+        assert!(!try_queue_udp_packet(
+            "test udp",
+            &packet_tx,
+            QueuedUdpPacket {
+                control,
+                packet: UdpPacketFrame {
+                    proxy_name: "udp-a".to_string(),
+                    content: b"closed".to_vec(),
+                    visitor_addr: "127.0.0.1:10002".to_string(),
+                },
+            },
+        ));
     }
 }
 
