@@ -1399,7 +1399,7 @@ fn spawn_udp_packet_batcher(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut queued = Vec::with_capacity(UDP_PACKET_BATCH_LIMIT);
-        let mut by_control: HashMap<String, (Arc<Control>, Vec<UdpPacketFrame>)> =
+        let mut by_control: HashMap<usize, (Arc<Control>, Vec<UdpPacketFrame>)> =
             HashMap::with_capacity(UDP_PACKET_BATCH_LIMIT);
         loop {
             let Some(first) = packet_rx.recv().await else {
@@ -1418,14 +1418,13 @@ fn spawn_udp_packet_batcher(
             let per_control_capacity = queued.len();
             by_control.clear();
             for queued_packet in queued.drain(..) {
-                let entry = by_control
-                    .entry(queued_packet.control.run_id.clone())
-                    .or_insert_with(|| {
-                        (
-                            queued_packet.control.clone(),
-                            Vec::with_capacity(per_control_capacity),
-                        )
-                    });
+                let control_key = Arc::as_ptr(&queued_packet.control) as usize;
+                let entry = by_control.entry(control_key).or_insert_with(|| {
+                    (
+                        queued_packet.control.clone(),
+                        Vec::with_capacity(per_control_capacity),
+                    )
+                });
                 entry.1.push(queued_packet.packet);
             }
 
