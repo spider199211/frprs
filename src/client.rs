@@ -3994,6 +3994,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn xtcp_direct_owner_rejects_unregistered_proxy_name() {
+        let proxy = ProxyConfig {
+            name: "xtcp-echo".to_string(),
+            proxy_type: ProxyType::Xtcp,
+            local_ip: "127.0.0.1".to_string(),
+            local_port: 1,
+            remote_port: 0,
+            group: Some("xtcp-group".to_string()),
+            group_key: Some("group-secret".to_string()),
+            custom_domains: Vec::new(),
+            locations: Vec::new(),
+            host_header_rewrite: None,
+            request_headers: Default::default(),
+            http_user: None,
+            http_password: None,
+            bandwidth_limit: None,
+            sk: Some("secret".to_string()),
+            health_check: None,
+        };
+        let (mut visitor, owner) = tcp_pair().await;
+        let owner_task = tokio::spawn(handle_xtcp_direct_owner_conn(proxy, owner));
+
+        write_msg(
+            &mut visitor,
+            &Message::NewVisitorConn {
+                proxy_name: "other-xtcp".to_string(),
+                sk: Some("secret".to_string()),
+                token: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        match read_msg(&mut visitor).await.unwrap() {
+            Message::NewVisitorConnResp { error, .. } => {
+                assert!(error.contains("not registered"));
+            }
+            other => panic!("unexpected direct response: {other:?}"),
+        }
+        owner_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn xtcp_direct_owner_rejects_secret_mismatch() {
+        let proxy = ProxyConfig {
+            name: "xtcp-echo".to_string(),
+            proxy_type: ProxyType::Xtcp,
+            local_ip: "127.0.0.1".to_string(),
+            local_port: 1,
+            remote_port: 0,
+            group: Some("xtcp-group".to_string()),
+            group_key: Some("group-secret".to_string()),
+            custom_domains: Vec::new(),
+            locations: Vec::new(),
+            host_header_rewrite: None,
+            request_headers: Default::default(),
+            http_user: None,
+            http_password: None,
+            bandwidth_limit: None,
+            sk: Some("secret".to_string()),
+            health_check: None,
+        };
+        let (mut visitor, owner) = tcp_pair().await;
+        let owner_task = tokio::spawn(handle_xtcp_direct_owner_conn(proxy, owner));
+
+        write_msg(
+            &mut visitor,
+            &Message::NewVisitorConn {
+                proxy_name: "xtcp-group".to_string(),
+                sk: Some("wrong-secret".to_string()),
+                token: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        match read_msg(&mut visitor).await.unwrap() {
+            Message::NewVisitorConnResp { error, .. } => {
+                assert!(error.contains("secret key mismatch"));
+            }
+            other => panic!("unexpected direct response: {other:?}"),
+        }
+        owner_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn xtcp_direct_owner_rejects_when_local_service_unavailable() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let missing_port = listener.local_addr().unwrap().port();
