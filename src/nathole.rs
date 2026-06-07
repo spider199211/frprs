@@ -52,6 +52,8 @@ pub enum NatHoleOutcome {
 #[derive(Debug)]
 pub struct NatHoleController {
     ttl: Duration,
+    cleanup_interval: Duration,
+    last_cleanup: Mutex<Instant>,
     sessions: Mutex<HashMap<String, NatHoleSession>>,
 }
 
@@ -79,8 +81,14 @@ impl Default for NatHoleController {
 
 impl NatHoleController {
     pub fn new(ttl: Duration) -> Self {
+        Self::new_with_cleanup_interval(ttl, Duration::from_secs(10))
+    }
+
+    fn new_with_cleanup_interval(ttl: Duration, cleanup_interval: Duration) -> Self {
         Self {
             ttl,
+            cleanup_interval,
+            last_cleanup: Mutex::new(Instant::now()),
             sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -93,8 +101,12 @@ impl NatHoleController {
             bail!("nat hole proxy_name is empty");
         }
 
+        let now = Instant::now();
+        let should_cleanup = self.should_cleanup(now);
         let mut sessions = self.sessions.lock().expect("nathole mutex poisoned");
-        Self::cleanup_locked(&mut sessions, self.ttl);
+        if should_cleanup {
+            Self::cleanup_locked(&mut sessions, self.ttl, now);
+        }
 
         let session = sessions
             .entry(peer.transaction_id.clone())
@@ -115,7 +127,6 @@ impl NatHoleController {
             );
         }
 
-        let now = Instant::now();
         match peer.role {
             NatHoleRole::Server => Self::upsert_peer(&mut session.servers, peer.clone(), now),
             NatHoleRole::Visitor => Self::upsert_peer(&mut session.visitors, peer.clone(), now),
@@ -123,7 +134,7 @@ impl NatHoleController {
         session.updated_at = now;
 
         Ok(
-            Self::candidate_from_session(session, peer.role, Some(&peer.run_id))
+            Self::candidate_from_session(session, peer.role, Some(&peer.run_id), self.ttl, now)
                 .map(NatHoleOutcome::Matched)
                 .unwrap_or(NatHoleOutcome::Waiting),
         )
@@ -134,11 +145,22 @@ impl NatHoleController {
         transaction_id: &str,
         role: NatHoleRole,
     ) -> Option<NatHoleCandidate> {
+        let now = Instant::now();
+        let should_cleanup = self.should_cleanup(now);
         let mut sessions = self.sessions.lock().expect("nathole mutex poisoned");
-        Self::cleanup_locked(&mut sessions, self.ttl);
-        sessions
-            .get_mut(transaction_id)
-            .and_then(|session| Self::candidate_from_session(session, role, None))
+        if should_cleanup {
+            Self::cleanup_locked(&mut sessions, self.ttl, now);
+        }
+        let mut remove_session = false;
+        let candidate = sessions.get_mut(transaction_id).and_then(|session| {
+            let candidate = Self::candidate_from_session(session, role, None, self.ttl, now);
+            remove_session = Self::session_is_empty_and_expired(session, self.ttl, now);
+            candidate
+        });
+        if remove_session {
+            sessions.remove(transaction_id);
+        }
+        candidate
     }
 
     pub fn remove(&self, transaction_id: &str) -> bool {
@@ -189,7 +211,10 @@ impl NatHoleController {
         session: &mut NatHoleSession,
         role: NatHoleRole,
         current_run_id: Option<&str>,
+        ttl: Duration,
+        now: Instant,
     ) -> Option<NatHoleCandidate> {
+        Self::prune_session_locked(session, ttl, now);
         let (peers, next) = match role.opposite() {
             NatHoleRole::Server => (&session.servers, &mut session.next_server),
             NatHoleRole::Visitor => (&session.visitors, &mut session.next_visitor),
@@ -223,21 +248,40 @@ impl NatHoleController {
         })
     }
 
-    fn cleanup_locked(sessions: &mut HashMap<String, NatHoleSession>, ttl: Duration) {
-        let now = Instant::now();
+    fn should_cleanup(&self, now: Instant) -> bool {
+        let mut last_cleanup = self
+            .last_cleanup
+            .lock()
+            .expect("nathole cleanup mutex poisoned");
+        if now.duration_since(*last_cleanup) < self.cleanup_interval {
+            return false;
+        }
+        *last_cleanup = now;
+        true
+    }
+
+    fn cleanup_locked(sessions: &mut HashMap<String, NatHoleSession>, ttl: Duration, now: Instant) {
         sessions.retain(|_, session| {
-            session
-                .servers
-                .retain(|peer| now.duration_since(peer.updated_at) <= ttl);
-            session
-                .visitors
-                .retain(|peer| now.duration_since(peer.updated_at) <= ttl);
-            session.next_server = session.next_server.min(session.servers.len());
-            session.next_visitor = session.next_visitor.min(session.visitors.len());
-            !session.servers.is_empty()
-                || !session.visitors.is_empty()
-                || now.duration_since(session.updated_at) <= ttl
+            Self::prune_session_locked(session, ttl, now);
+            !Self::session_is_empty_and_expired(session, ttl, now)
         });
+    }
+
+    fn prune_session_locked(session: &mut NatHoleSession, ttl: Duration, now: Instant) {
+        session
+            .servers
+            .retain(|peer| now.duration_since(peer.updated_at) <= ttl);
+        session
+            .visitors
+            .retain(|peer| now.duration_since(peer.updated_at) <= ttl);
+        session.next_server = session.next_server.min(session.servers.len());
+        session.next_visitor = session.next_visitor.min(session.visitors.len());
+    }
+
+    fn session_is_empty_and_expired(session: &NatHoleSession, ttl: Duration, now: Instant) -> bool {
+        session.servers.is_empty()
+            && session.visitors.is_empty()
+            && now.duration_since(session.updated_at) > ttl
     }
 }
 
@@ -473,6 +517,105 @@ mod tests {
                 local_addrs: vec![addr(10002)],
             })
         );
+    }
+
+    #[test]
+    fn does_not_match_stale_peer_between_global_cleanups() {
+        let controller = NatHoleController::new_with_cleanup_interval(
+            Duration::from_millis(80),
+            Duration::from_secs(10),
+        );
+
+        assert_eq!(
+            controller
+                .register(NatHolePeer {
+                    transaction_id: "tx-local-prune".to_string(),
+                    proxy_name: "xtcp-prune".to_string(),
+                    run_id: "owner-stale".to_string(),
+                    role: NatHoleRole::Server,
+                    observed_addr: addr(7001),
+                    local_addrs: vec![addr(10001)],
+                })
+                .unwrap(),
+            NatHoleOutcome::Waiting
+        );
+        thread::sleep(Duration::from_millis(120));
+
+        assert_eq!(
+            controller
+                .register(NatHolePeer {
+                    transaction_id: "tx-local-prune".to_string(),
+                    proxy_name: "xtcp-prune".to_string(),
+                    run_id: "visitor".to_string(),
+                    role: NatHoleRole::Visitor,
+                    observed_addr: addr(8001),
+                    local_addrs: vec![addr(9001)],
+                })
+                .unwrap(),
+            NatHoleOutcome::Waiting
+        );
+    }
+
+    #[test]
+    fn throttles_global_cleanup_of_unrelated_stale_transactions() {
+        let controller = NatHoleController::new_with_cleanup_interval(
+            Duration::from_millis(80),
+            Duration::from_millis(120),
+        );
+
+        assert_eq!(
+            controller
+                .register(NatHolePeer {
+                    transaction_id: "tx-stale-unrelated".to_string(),
+                    proxy_name: "xtcp-prune".to_string(),
+                    run_id: "owner-stale".to_string(),
+                    role: NatHoleRole::Server,
+                    observed_addr: addr(7001),
+                    local_addrs: vec![addr(10001)],
+                })
+                .unwrap(),
+            NatHoleOutcome::Waiting
+        );
+        thread::sleep(Duration::from_millis(90));
+
+        assert_eq!(
+            controller
+                .register(NatHolePeer {
+                    transaction_id: "tx-fresh".to_string(),
+                    proxy_name: "xtcp-prune".to_string(),
+                    run_id: "owner-fresh".to_string(),
+                    role: NatHoleRole::Server,
+                    observed_addr: addr(7002),
+                    local_addrs: vec![addr(10002)],
+                })
+                .unwrap(),
+            NatHoleOutcome::Waiting
+        );
+        assert!(controller
+            .sessions
+            .lock()
+            .unwrap()
+            .contains_key("tx-stale-unrelated"));
+
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            controller
+                .register(NatHolePeer {
+                    transaction_id: "tx-trigger-cleanup".to_string(),
+                    proxy_name: "xtcp-prune".to_string(),
+                    run_id: "owner-trigger".to_string(),
+                    role: NatHoleRole::Server,
+                    observed_addr: addr(7003),
+                    local_addrs: vec![addr(10003)],
+                })
+                .unwrap(),
+            NatHoleOutcome::Waiting
+        );
+        assert!(!controller
+            .sessions
+            .lock()
+            .unwrap()
+            .contains_key("tx-stale-unrelated"));
     }
 
     #[test]
