@@ -11,7 +11,7 @@ This file tracks the Rust rewrite against the upstream `fatedier/frp` feature su
 | UDP proxy | Implemented | Request/response forwarding, local NAT session reuse, bidirectional batching, grouped packet batching, batch destination caching, batch-path preallocation, server-side batch buffer reuse, throttled datagram plugin-session pruning, and groups are implemented. Deeper packet-path optimizations remain. |
 | HTTP proxy | Implemented | Routes by `Host`, wildcard domains, `locations`, header rewrite, Basic Auth, real IP headers, and groups. |
 | HTTPS proxy | Implemented | Routes by TLS SNI / `customDomains`, wildcard domains, `*` fallback, groups, and raw passthrough. |
-| Connection pool | Implemented | `poolCount` pre-opens work connections, preallocates the queue by pool size, coalesces replenishment, requests only immediate waiter demand, and reuses TCP stream mux/QUIC client sessions for control/work streams. |
+| Connection pool | Implemented | `poolCount` pre-opens work connections, preallocates the queue by pool size, coalesces replenishment, requests only immediate waiter demand, bounds client-side work-connection dialing, and reuses TCP stream mux/QUIC client sessions for control/work streams. |
 | Bandwidth limiting | Implemented | `bandwidthLimit` throttles TCP/HTTP/HTTPS stream copy. |
 | Hot reload | Implemented | `frpc` watches config mtime and reconnects when the file changes. |
 | Dashboard | Implemented | Built-in HTML status page plus clients, proxies, groups, status, and metrics JSON APIs. |
@@ -41,7 +41,7 @@ Current tested flows:
 - TCP health check closing an unhealthy proxy listener.
 - Dashboard status JSON endpoint.
 - Dashboard admin close, metrics reset, and allowPorts update endpoints.
-- TCP proxy with pooled work connections and TCP stream mux transport coverage.
+- TCP proxy with pooled work connections, bounded client-side work-connection dialing, and TCP stream mux transport coverage.
 - STCP visitor forwarding through a local visitor listener.
 - STCP, XTCP, UDP, HTTP, HTTPS, TCPMUX, and SUDP group load balancing.
 - SUDP visitor forwarding by relay and direct data path with stale peer re-probing, bounded direct visitor sessions, fallback pending cleanup, and owner response peer refresh.

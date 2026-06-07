@@ -27,7 +27,7 @@ This is a Rust rewrite scaffold for `fatedier/frp`.
 - 服务端 `allowPorts` 端口白名单策略，限制 TCP/UDP 远端监听端口
 - Dashboard Admin API 支持运行时查看/替换 `allowPorts`
 - TCP `group`/`groupKey` 分组负载均衡，支持多个代理共享同一远端端口
-- 通过 `poolCount` 预创建 work connection 连接池、按池大小预分配队列，合并高并发下的补池请求，并按等待者即时需求精确请求连接
+- 通过 `poolCount` 预创建 work connection 连接池、按池大小预分配队列，合并高并发下的补池请求，按等待者即时需求精确请求连接，并限制客户端 work connection 建连并发
 - 通过 `bandwidthLimit` 对 TCP/HTTP/HTTPS 做带宽限制
 - UDP 本地会话复用、双向批量转发、分组批量转发、批处理热路径缓存和 `group`/`groupKey` 分组负载均衡
 - `frpc` 根据配置文件修改时间自动热加载
@@ -267,7 +267,7 @@ cargo run --bin frpc -- -c conf/frpc.toml
 - HTTPS：已实现 SNI 嗅探、原始 TLS 透传、通配域名、`*` 兜底路由和分组负载均衡。
 - TCP mux：已实现基于 HTTP CONNECT 的基础隧道路由和分组负载均衡。
 - 健康检查：已实现 TCP/HTTP 健康检查，并在 Dashboard/API 中暴露代理健康状态。
-- 连接池：已通过 `poolCount` 实现预创建 work connection、按池大小预分配队列，合并高并发补池请求，并按等待者即时需求精确请求连接；TCP stream mux/QUIC 传输会在同一 client session 上复用 control/work stream。
+- 连接池：已通过 `poolCount` 实现预创建 work connection、按池大小预分配队列，合并高并发补池请求，按等待者即时需求精确请求连接，并限制客户端 work connection 建连并发；TCP stream mux/QUIC 传输会在同一 client session 上复用 control/work stream。
 - 带宽限制：已实现按代理限速。
 - Dashboard：已实现内置状态页面、客户端/代理/分组/指标 JSON API 和关闭代理/分组/客户端代理 Admin API。
 - 插件：已实现服务端登录、新代理、TCP/UDP/SUDP/HTTP/HTTPS/TCPMUX 新用户连接、关闭代理 plain HTTP 钩子，并补充 frp 风格 `op` 字段。
@@ -275,7 +275,7 @@ cargo run --bin frpc -- -c conf/frpc.toml
 - TLS/WebSocket/TCP stream mux/QUIC/KCP：已实现真实控制/工作连接传输，并有端到端代理测试覆盖；TCP stream mux/QUIC 已复用同一连接承载 control/work 双向 stream。
 - STCP/XTCP：已实现 TCP 流的私有 visitor 转发和分组负载均衡；XTCP 已支持可达 peer 的直连数据面，并保留服务端中继 fallback。
 - SUDP/XTCP/P2P：已实现 XTCP/SUDP 直连优先数据面、SUDP 私有服务分组负载均衡、XTCP/SUDP 按分组名直连注册与探测、XTCP/SUDP owner 候选周期刷新、NAT 控制器事务表容量上限、同一事务多 peer 候选有界保留、按 peer 过期清理与轮询、候选局部过期过滤、全局清理节流、local candidate 数量限制、XTCP/SUDP waiting 后短暂等待异步匹配与短 TTL 去重、同 key 并发 NAT 注册合并与有界 waiter fan-out、按事务/代理名/角色隔离的异步通知缓存、XTCP owner 本地服务确认后接受直连、SUDP probe 选路与短时重试、SUDP direct 有界 visitor 会话状态和 pending 队列、SUDP direct 响应代理名校验、SUDP fallback 后 pending 清理、SUDP owner 主动 punch 短时重试、SUDP owner 响应 peer 刷新、XTCP 成功直连 peer 短 TTL 且有容量上限复用、SUDP 带 TTL 且有容量上限的响应确认直连 peer/未确认回退/失败短 TTL 且有容量上限跳过与 probe 重试降噪、服务端中继 fallback、NAT 双端匹配通知、客户端带 TTL 且有容量上限的异步通知缓存、不可用直连候选过滤、按地址可达性优先且有数量上限的候选优选、XTCP 候选竞速/慢候选取消和失败候选短 TTL 且有容量上限跳过；更完整的复杂 NAT 场景仍待验证和完善。
-- Transport/热路径：已补 TLS、WebSocket、TCP stream mux、QUIC client session 复用、基础 TCP mux、work connection 补池合并、等待者按需请求、UDP 批处理缓存/批路径预分配、服务端批处理缓冲复用和 datagram 插件会话清理节流；后续继续补更多连接池调优。
+- Transport/热路径：已补 TLS、WebSocket、TCP stream mux、QUIC client session 复用、基础 TCP mux、work connection 补池合并、等待者按需请求、客户端 work connection 建连限流、UDP 批处理缓存/批路径预分配、服务端批处理缓冲复用和 datagram 插件会话清理节流；后续继续补更多连接池调优。
 - 运行时控制：已补轻量 Admin API、更多状态 API、指标接口、指标重置、按代理/分组/客户端关闭能力和 `allowPorts` 运行时更新；后续补更完整的运行时配置管理。
 - 策略能力：已补端口白名单和 TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/XTCP/SUDP 分组负载均衡；后续补更多协议的分组能力。
 - 插件能力：已补服务端 TCP/UDP/SUDP/HTTP/HTTPS/TCPMUX 新用户连接钩子、客户端 TCP/UDP/SUDP 本地连接或会话前 HTTP 钩子和 `op` 兼容字段；后续补更多协议兼容。
@@ -304,7 +304,7 @@ The current milestone implements the core reverse TCP proxy path:
 - server-side `allowPorts` policy for TCP/UDP remote listeners
 - dashboard Admin API for viewing/replacing `allowPorts` at runtime
 - TCP `group`/`groupKey` load balancing across multiple proxies sharing one remote port
-- pre-opened TCP work connection pools with `poolCount`, queue preallocation by pool size, coalesced replenish requests under concurrent load, and demand-aware waiter requests
+- pre-opened TCP work connection pools with `poolCount`, queue preallocation by pool size, coalesced replenish requests under concurrent load, demand-aware waiter requests, and bounded client-side work-connection dialing
 - TCP/HTTP/HTTPS bandwidth limiting with `bandwidthLimit`
 - UDP local session reuse, bidirectional batching, batch-path caching, and `group`/`groupKey` load balancing
 - frpc config hot reload by file modification time
@@ -496,7 +496,7 @@ Parity roadmap:
 - HTTPS: SNI sniffing, raw TLS passthrough routing, wildcard domains, `*` fallback routing, and group load balancing implemented.
 - TCP mux: basic HTTP CONNECT tunnel routing and group load balancing implemented.
 - Health checks: TCP and HTTP health checks implemented, with proxy health status exposed through the Dashboard/API.
-- Connection pool: pre-opened work connections implemented through `poolCount`, with queue preallocation by pool size, coalesced replenish requests, demand-aware waiter requests, and TCP stream mux/QUIC client-session reuse for control/work streams.
+- Connection pool: pre-opened work connections implemented through `poolCount`, with queue preallocation by pool size, coalesced replenish requests, demand-aware waiter requests, bounded client-side work-connection dialing, and TCP stream mux/QUIC client-session reuse for control/work streams.
 - Bandwidth limit: per-proxy byte throttling implemented for stream proxies.
 - Dashboard: built-in status page, client/proxy/group/metrics JSON APIs, and close-proxy/group/client Admin APIs implemented.
 - Plugins: basic plain-HTTP login, new-proxy, TCP/UDP/SUDP/HTTP/HTTPS/TCPMUX new-user-connection, and close-proxy hooks implemented, with frp-style `op` fields.
@@ -504,7 +504,7 @@ Parity roadmap:
 - TLS/WebSocket/TCP stream mux/QUIC/KCP: real control/work transports implemented and covered by end-to-end proxy tests; TCP stream mux and QUIC reuse one client connection for control/work bidirectional streams.
 - STCP/XTCP: private visitor flow and group load balancing implemented for TCP streams; XTCP now has a direct data path for reachable peers plus server-relay fallback.
 - SUDP/XTCP/P2P: XTCP/SUDP direct-first data paths, SUDP private-service group load balancing, XTCP/SUDP direct registration and probing by group name, periodic XTCP/SUDP owner candidate refresh, bounded NAT session table, bounded multiple peers per NAT transaction with per-peer expiry, candidate round-robin, local stale-candidate filtering, throttled global cleanup, local-candidate count limiting, same-key concurrent register coalescing plus bounded waiter fan-out, transaction/proxy/role-scoped async notifications, short XTCP/SUDP wait for async matches after `waiting`, short TTL deduplication for repeated waiting lookups, XTCP owner-side local-service validation before direct acceptance, SUDP probe-based path selection with short retries, bounded SUDP direct visitor session state and pending queue, direct-response proxy-name validation, pending cleanup after fallback, SUDP owner-side active punching with short retries, SUDP owner response peer refresh, TTL-capped and bounded successful XTCP direct peer reuse, SUDP TTL-capped and bounded response-confirmed direct peer caching/unconfirmed fallback/failed direct skip with probe retry suppression, server-relay fallback, two-sided NAT match notification, client-side TTL-capped and bounded async notification caching, unusable direct-candidate filtering, reachability-first and bounded candidate preference, XTCP candidate racing with slower-candidate cancellation, and short TTL and bounded skip for failed XTCP candidates are implemented; fuller complex NAT scenarios still need broader validation and tuning.
-- Transport/hot paths: TLS, WebSocket, TCP stream mux, QUIC client-session reuse, basic TCP mux, work-connection replenish coalescing, waiter demand-aware requests, UDP group batching, UDP batch-path caching/preallocation, server-side batch buffer reuse, and throttled datagram plugin-session pruning implemented; add more connection-pool tuning.
+- Transport/hot paths: TLS, WebSocket, TCP stream mux, QUIC client-session reuse, basic TCP mux, work-connection replenish coalescing, waiter demand-aware requests, bounded client-side work-connection dialing, UDP group batching, UDP batch-path caching/preallocation, server-side batch buffer reuse, and throttled datagram plugin-session pruning implemented; add more connection-pool tuning.
 - Runtime controls: lightweight Admin API, richer status APIs, metrics endpoint/reset, proxy/group/client close operations, and runtime `allowPorts` updates implemented; full runtime config management remains.
 - Policy: allow ports and TCP/UDP/HTTP/HTTPS/TCPMUX/STCP/XTCP/SUDP group load balancing implemented; broader protocol group support remains.
 - Plugins: server-side TCP/UDP/SUDP/HTTP/HTTPS/TCPMUX new-user-connection hook and client-side local-connect HTTP hook implemented for TCP/UDP/SUDP with `op` compatibility fields; more protocol compatibility remains.

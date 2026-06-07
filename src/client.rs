@@ -19,7 +19,7 @@ use std::{
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt, WriteHalf},
     net::{TcpListener, TcpStream, UdpSocket},
-    sync::{mpsc, oneshot, Mutex},
+    sync::{mpsc, oneshot, Mutex, OwnedSemaphorePermit, Semaphore},
     time,
 };
 use tracing::{debug, error, info, warn};
@@ -41,6 +41,7 @@ const SUDP_DIRECT_PEER_TTL: Duration = Duration::from_secs(30);
 const SUDP_DIRECT_PEER_LIMIT: usize = 1024;
 const SUDP_DIRECT_SESSION_LIMIT: usize = 1024;
 const SUDP_DIRECT_PENDING_LIMIT: usize = 64;
+const WORK_CONN_DIAL_LIMIT: usize = 32;
 const UDP_PACKET_BATCH_LIMIT: usize = 32;
 const UDP_PACKET_BATCH_WAIT: Duration = Duration::from_millis(2);
 
@@ -68,6 +69,7 @@ struct ClientState {
     writer: Arc<Mutex<WriteHalf<BoxStream>>>,
     quic_session: Option<Arc<transports::quic::QuicClientSession>>,
     tcp_mux_session: Option<Arc<transports::tcp_mux::MuxSession>>,
+    work_conn_dial_limiter: Arc<Semaphore>,
 }
 
 #[derive(Clone)]
@@ -248,6 +250,7 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
         writer: Arc::new(Mutex::new(writer)),
         quic_session: session.quic_session,
         tcp_mux_session: session.tcp_mux_session,
+        work_conn_dial_limiter: Arc::new(Semaphore::new(WORK_CONN_DIAL_LIMIT)),
     };
 
     for proxy in state.proxies.values().cloned() {
@@ -2463,6 +2466,7 @@ fn unix_now() -> u64 {
 
 async fn open_work_conn(state: ClientState) -> Result<()> {
     let server_addr = state.cfg.server_addr();
+    let dial_permit = acquire_work_conn_dial_permit(&state).await?;
     let mut stream = open_control_stream(&state)
         .await
         .with_context(|| format!("open work connection to {server_addr}"))?;
@@ -2474,6 +2478,7 @@ async fn open_work_conn(state: ClientState) -> Result<()> {
         },
     )
     .await?;
+    drop(dial_permit);
 
     let start = read_msg(&mut stream).await?;
     let (proxy_name, src_addr, dst_addr) = match start {
@@ -2513,6 +2518,15 @@ async fn open_work_conn(state: ClientState) -> Result<()> {
         .await
         .with_context(|| format!("copy bytes for proxy {proxy_name}"))?;
     Ok(())
+}
+
+async fn acquire_work_conn_dial_permit(state: &ClientState) -> Result<OwnedSemaphorePermit> {
+    state
+        .work_conn_dial_limiter
+        .clone()
+        .acquire_owned()
+        .await
+        .context("work connection dial limiter closed")
 }
 
 fn configure_tcp_stream(stream: &TcpStream) {
@@ -2884,6 +2898,7 @@ mod tests {
             writer: Arc::new(Mutex::new(writer)),
             quic_session: None,
             tcp_mux_session: None,
+            work_conn_dial_limiter: Arc::new(Semaphore::new(WORK_CONN_DIAL_LIMIT)),
         };
         (state, server)
     }
@@ -2910,6 +2925,34 @@ mod tests {
             }
         });
         (addr, task)
+    }
+
+    #[tokio::test]
+    async fn work_connection_dial_permits_are_bounded() {
+        let (state, _server) = test_state();
+        let mut permits = Vec::with_capacity(WORK_CONN_DIAL_LIMIT);
+
+        for _ in 0..WORK_CONN_DIAL_LIMIT {
+            permits.push(acquire_work_conn_dial_permit(&state).await.unwrap());
+        }
+
+        assert_eq!(state.work_conn_dial_limiter.available_permits(), 0);
+        let blocked = time::timeout(
+            Duration::from_millis(100),
+            acquire_work_conn_dial_permit(&state),
+        )
+        .await;
+        assert!(blocked.is_err(), "extra dial permit was not bounded");
+
+        drop(permits.pop());
+        let permit = time::timeout(
+            Duration::from_secs(1),
+            acquire_work_conn_dial_permit(&state),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(permit);
     }
 
     async fn spawn_hanging_xtcp_direct_test_peer() -> XtcpHangingPeer {
