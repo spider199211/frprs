@@ -26,6 +26,7 @@ use tracing::{debug, error, info, warn};
 
 const DIRECT_SUDP_MAGIC: &str = "frprs-sudp-direct-v1";
 const NAT_HOLE_CACHED_RESPONSE_TTL: Duration = Duration::from_secs(30);
+const NAT_HOLE_CACHED_RESPONSE_LIMIT: usize = 256;
 const NAT_HOLE_WAITING_RETRY_TTL: Duration = Duration::from_secs(1);
 const NAT_HOLE_OWNER_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 const XTCP_DIRECT_FAILURE_TTL: Duration = Duration::from_secs(5);
@@ -543,19 +544,37 @@ async fn handle_nat_hole_response(
             debug!("sudp owner punch for {proxy_name}/{transaction_id} failed: {err:#}");
         }
     }
-    state.nat_hole_cached.lock().await.insert(
-        key,
-        NatHoleCachedResponse {
-            resp,
-            cached_at: Instant::now(),
-        },
-    );
+    cache_nat_hole_response(state, key, resp).await;
 }
 
 async fn take_cached_nat_hole_response(state: &ClientState, key: &str) -> Option<NatHoleResponse> {
     let mut cached = state.nat_hole_cached.lock().await;
     let cached_resp = cached.remove(key)?;
     (cached_resp.cached_at.elapsed() <= NAT_HOLE_CACHED_RESPONSE_TTL).then_some(cached_resp.resp)
+}
+
+async fn cache_nat_hole_response(state: &ClientState, key: String, resp: NatHoleResponse) {
+    let now = Instant::now();
+    let mut cached = state.nat_hole_cached.lock().await;
+    cached.retain(|_, cached_resp| {
+        now.duration_since(cached_resp.cached_at) <= NAT_HOLE_CACHED_RESPONSE_TTL
+    });
+    if cached.len() >= NAT_HOLE_CACHED_RESPONSE_LIMIT {
+        if let Some(oldest_key) = cached
+            .iter()
+            .min_by_key(|(_, cached_resp)| cached_resp.cached_at)
+            .map(|(key, _)| key.clone())
+        {
+            cached.remove(&oldest_key);
+        }
+    }
+    cached.insert(
+        key,
+        NatHoleCachedResponse {
+            resp,
+            cached_at: now,
+        },
+    );
 }
 
 async fn request_nat_hole(
@@ -2847,6 +2866,51 @@ mod tests {
             .lock()
             .await
             .contains_key(&nat_hole_waiter_key("tx-cache", "visitor")));
+    }
+
+    #[tokio::test]
+    async fn nat_hole_cached_responses_are_bounded_and_prune_expired_entries() {
+        let (state, _server) = test_state();
+        {
+            let mut cached = state.nat_hole_cached.lock().await;
+            cached.insert(
+                nat_hole_waiter_key("tx-expired", "visitor"),
+                NatHoleCachedResponse {
+                    resp: NatHoleResponse {
+                        peer_observed_addr: "127.0.0.1:7000".to_string(),
+                        peer_local_addrs: Vec::new(),
+                        waiting: false,
+                        error: String::new(),
+                    },
+                    cached_at: Instant::now()
+                        - NAT_HOLE_CACHED_RESPONSE_TTL
+                        - Duration::from_secs(1),
+                },
+            );
+        }
+
+        for idx in 0..=NAT_HOLE_CACHED_RESPONSE_LIMIT {
+            cache_nat_hole_response(
+                &state,
+                nat_hole_waiter_key(&format!("tx-{idx}"), "visitor"),
+                NatHoleResponse {
+                    peer_observed_addr: format!("127.0.0.1:{}", 7000 + idx),
+                    peer_local_addrs: Vec::new(),
+                    waiting: false,
+                    error: String::new(),
+                },
+            )
+            .await;
+        }
+
+        let cached = state.nat_hole_cached.lock().await;
+        assert_eq!(cached.len(), NAT_HOLE_CACHED_RESPONSE_LIMIT);
+        assert!(!cached.contains_key(&nat_hole_waiter_key("tx-expired", "visitor")));
+        assert!(!cached.contains_key(&nat_hole_waiter_key("tx-0", "visitor")));
+        assert!(cached.contains_key(&nat_hole_waiter_key(
+            &format!("tx-{NAT_HOLE_CACHED_RESPONSE_LIMIT}"),
+            "visitor"
+        )));
     }
 
     #[tokio::test]
