@@ -8,6 +8,7 @@ use std::{
 };
 
 const NAT_HOLE_PEER_LIMIT_PER_ROLE: usize = 64;
+const NAT_HOLE_SESSION_LIMIT: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -108,6 +109,9 @@ impl NatHoleController {
         let mut sessions = self.sessions.lock().expect("nathole mutex poisoned");
         if should_cleanup {
             Self::cleanup_locked(&mut sessions, self.ttl, now);
+        }
+        if !sessions.contains_key(&peer.transaction_id) {
+            Self::enforce_session_limit_locked(&mut sessions);
         }
 
         let session = sessions
@@ -296,6 +300,19 @@ impl NatHoleController {
             Self::prune_session_locked(session, ttl, now);
             !Self::session_is_empty_and_expired(session, ttl, now)
         });
+    }
+
+    fn enforce_session_limit_locked(sessions: &mut HashMap<String, NatHoleSession>) {
+        if sessions.len() < NAT_HOLE_SESSION_LIMIT {
+            return;
+        }
+        if let Some(oldest) = sessions
+            .iter()
+            .min_by_key(|(_, session)| session.updated_at)
+            .map(|(transaction_id, _)| transaction_id.clone())
+        {
+            sessions.remove(&oldest);
+        }
     }
 
     fn prune_session_locked(session: &mut NatHoleSession, ttl: Duration, now: Instant) {
@@ -634,6 +651,70 @@ mod tests {
             .servers
             .iter()
             .any(|entry| entry.peer.run_id == "owner-new"));
+    }
+
+    #[test]
+    fn bounds_total_nat_hole_sessions() {
+        let controller = NatHoleController::default();
+
+        for idx in 0..=NAT_HOLE_SESSION_LIMIT {
+            controller
+                .register(NatHolePeer {
+                    transaction_id: format!("tx-{idx}"),
+                    proxy_name: "xtcp-group".to_string(),
+                    run_id: format!("owner-{idx}"),
+                    role: NatHoleRole::Server,
+                    observed_addr: addr(7000 + idx as u16),
+                    local_addrs: vec![addr(12000 + idx as u16)],
+                })
+                .unwrap();
+        }
+
+        let sessions = controller.sessions.lock().unwrap();
+        assert_eq!(sessions.len(), NAT_HOLE_SESSION_LIMIT);
+        assert!(!sessions.contains_key("tx-0"));
+        assert!(sessions.contains_key(&format!("tx-{NAT_HOLE_SESSION_LIMIT}")));
+    }
+
+    #[test]
+    fn refreshing_existing_session_does_not_evict_when_session_table_is_full() {
+        let controller = NatHoleController::default();
+
+        for idx in 0..NAT_HOLE_SESSION_LIMIT {
+            controller
+                .register(NatHolePeer {
+                    transaction_id: format!("tx-{idx}"),
+                    proxy_name: "xtcp-group".to_string(),
+                    run_id: format!("owner-{idx}"),
+                    role: NatHoleRole::Server,
+                    observed_addr: addr(7000 + idx as u16),
+                    local_addrs: vec![addr(12000 + idx as u16)],
+                })
+                .unwrap();
+        }
+
+        controller
+            .register(NatHolePeer {
+                transaction_id: "tx-0".to_string(),
+                proxy_name: "xtcp-group".to_string(),
+                run_id: "owner-0".to_string(),
+                role: NatHoleRole::Server,
+                observed_addr: addr(9000),
+                local_addrs: vec![addr(14000)],
+            })
+            .unwrap();
+
+        let sessions = controller.sessions.lock().unwrap();
+        assert_eq!(sessions.len(), NAT_HOLE_SESSION_LIMIT);
+        assert!(sessions.contains_key("tx-0"));
+        assert!(sessions.contains_key(&format!("tx-{}", NAT_HOLE_SESSION_LIMIT - 1)));
+        assert_eq!(
+            sessions
+                .get("tx-0")
+                .and_then(|session| session.servers.first())
+                .map(|entry| entry.peer.observed_addr),
+            Some(addr(9000))
+        );
     }
 
     #[test]
