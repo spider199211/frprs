@@ -27,6 +27,7 @@ use tracing::{debug, error, info, warn};
 const DIRECT_SUDP_MAGIC: &str = "frprs-sudp-direct-v1";
 const NAT_HOLE_CACHED_RESPONSE_TTL: Duration = Duration::from_secs(30);
 const NAT_HOLE_CACHED_RESPONSE_LIMIT: usize = 256;
+const NAT_HOLE_WAITER_LIMIT: usize = 64;
 const NAT_HOLE_WAITING_RETRY_TTL: Duration = Duration::from_secs(1);
 const NAT_HOLE_OWNER_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 const XTCP_DIRECT_FAILURE_TTL: Duration = Duration::from_secs(5);
@@ -605,7 +606,7 @@ async fn request_nat_hole(
     }
 
     let (tx, rx) = oneshot::channel();
-    let should_send = add_nat_hole_waiter(state, key.clone(), tx).await;
+    let should_send = add_nat_hole_waiter(state, key.clone(), tx).await?;
     if should_send {
         let send_result = state
             .send(&Message::NatHoleRegister {
@@ -665,7 +666,10 @@ async fn request_nat_hole_with_grace(
     }
 
     let (tx, rx) = oneshot::channel();
-    add_nat_hole_waiter(state, key.clone(), tx).await;
+    if let Err(err) = add_nat_hole_waiter(state, key.clone(), tx).await {
+        debug!("skip nat hole grace waiter for {key}: {err:#}");
+        return Ok(resp);
+    }
     match time::timeout(grace, rx).await {
         Ok(Ok(resp)) => {
             if !resp.error.is_empty() {
@@ -694,12 +698,15 @@ async fn add_nat_hole_waiter(
     state: &ClientState,
     key: String,
     tx: oneshot::Sender<NatHoleResponse>,
-) -> bool {
+) -> Result<bool> {
     let mut waiters = state.nat_hole_waiters.lock().await;
-    let entries = waiters.entry(key).or_default();
+    let entries = waiters.entry(key.clone()).or_default();
+    if entries.len() >= NAT_HOLE_WAITER_LIMIT {
+        bail!("too many nat hole waiters for {key}");
+    }
     let should_send = entries.is_empty();
     entries.push(tx);
-    should_send
+    Ok(should_send)
 }
 
 async fn remove_closed_nat_hole_waiters(state: &ClientState, key: &str) {
@@ -3207,6 +3214,31 @@ mod tests {
             assert_eq!(response.peer_local_addrs, vec!["10.0.0.10:10001"]);
         }
         assert!(!state.nat_hole_waiters.lock().await.contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn nat_hole_waiters_are_bounded_per_key() {
+        let (state, _server) = test_state();
+        let key = nat_hole_waiter_key("xtcp-bounded", "visitor");
+        let mut receivers = Vec::new();
+
+        for idx in 0..NAT_HOLE_WAITER_LIMIT {
+            let (tx, rx) = oneshot::channel();
+            receivers.push(rx);
+            let should_send = add_nat_hole_waiter(&state, key.clone(), tx).await.unwrap();
+            assert_eq!(should_send, idx == 0);
+        }
+
+        let (tx, rx) = oneshot::channel();
+        receivers.push(rx);
+        let err = add_nat_hole_waiter(&state, key.clone(), tx)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("too many nat hole waiters"));
+        assert_eq!(
+            state.nat_hole_waiters.lock().await.get(&key).map(Vec::len),
+            Some(NAT_HOLE_WAITER_LIMIT)
+        );
     }
 
     #[tokio::test]
