@@ -1394,8 +1394,14 @@ fn spawn_udp_packet_batcher(
     mut packet_rx: mpsc::Receiver<QueuedUdpPacket>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(first) = packet_rx.recv().await {
-            let mut queued = Vec::with_capacity(UDP_PACKET_BATCH_LIMIT);
+        let mut queued = Vec::with_capacity(UDP_PACKET_BATCH_LIMIT);
+        let mut by_control: HashMap<String, (Arc<Control>, Vec<UdpPacketFrame>)> =
+            HashMap::with_capacity(UDP_PACKET_BATCH_LIMIT);
+        loop {
+            let Some(first) = packet_rx.recv().await else {
+                break;
+            };
+            queued.clear();
             queued.push(first);
             time::sleep(UDP_PACKET_BATCH_WAIT).await;
             while queued.len() < UDP_PACKET_BATCH_LIMIT {
@@ -1406,9 +1412,8 @@ fn spawn_udp_packet_batcher(
             }
 
             let per_control_capacity = queued.len();
-            let mut by_control: HashMap<String, (Arc<Control>, Vec<UdpPacketFrame>)> =
-                HashMap::with_capacity(per_control_capacity);
-            for queued_packet in queued {
+            by_control.clear();
+            for queued_packet in queued.drain(..) {
                 let entry = by_control
                     .entry(queued_packet.control.run_id.clone())
                     .or_insert_with(|| {
@@ -1420,7 +1425,7 @@ fn spawn_udp_packet_batcher(
                 entry.1.push(queued_packet.packet);
             }
 
-            for (_, (control, mut packets)) in by_control {
+            for (_, (control, mut packets)) in by_control.drain() {
                 let msg = if packets.len() == 1 {
                     let packet = packets.pop().expect("batch has one packet");
                     Message::UdpPacket {
