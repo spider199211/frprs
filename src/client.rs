@@ -31,9 +31,13 @@ const NAT_HOLE_WAITER_LIMIT: usize = 64;
 const NAT_HOLE_WAITING_RETRY_TTL: Duration = Duration::from_secs(1);
 const NAT_HOLE_OWNER_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 const XTCP_DIRECT_FAILURE_TTL: Duration = Duration::from_secs(5);
+const XTCP_DIRECT_FAILURE_LIMIT: usize = 256;
 const XTCP_DIRECT_PEER_TTL: Duration = Duration::from_secs(30);
+const XTCP_DIRECT_PEER_LIMIT: usize = 256;
 const SUDP_DIRECT_FAILURE_TTL: Duration = Duration::from_secs(5);
+const SUDP_DIRECT_FAILURE_LIMIT: usize = 1024;
 const SUDP_DIRECT_PEER_TTL: Duration = Duration::from_secs(30);
+const SUDP_DIRECT_PEER_LIMIT: usize = 1024;
 const SUDP_DIRECT_PENDING_LIMIT: usize = 64;
 const UDP_PACKET_BATCH_LIMIT: usize = 32;
 const UDP_PACKET_BATCH_WAIT: Duration = Duration::from_millis(2);
@@ -1209,11 +1213,11 @@ async fn should_skip_xtcp_direct(state: &ClientState, server_name: &str) -> bool
 }
 
 async fn mark_xtcp_direct_failure(state: &ClientState, server_name: &str) {
-    state
-        .xtcp_direct_failures
-        .lock()
-        .await
-        .insert(server_name.to_string(), Instant::now());
+    let now = Instant::now();
+    let mut failures = state.xtcp_direct_failures.lock().await;
+    prune_instant_cache(&mut failures, XTCP_DIRECT_FAILURE_TTL, now);
+    trim_oldest_instant_cache(&mut failures, XTCP_DIRECT_FAILURE_LIMIT);
+    failures.insert(server_name.to_string(), now);
 }
 
 async fn clear_xtcp_direct_failure(state: &ClientState, server_name: &str) {
@@ -1231,17 +1235,55 @@ async fn take_fresh_xtcp_direct_peer(state: &ClientState, server_name: &str) -> 
 }
 
 async fn record_xtcp_direct_peer(state: &ClientState, server_name: &str, candidate: String) {
-    state.xtcp_direct_peers.lock().await.insert(
+    let now = Instant::now();
+    let mut peers = state.xtcp_direct_peers.lock().await;
+    prune_xtcp_direct_peer_cache(&mut peers, now);
+    trim_oldest_xtcp_direct_peer_cache(&mut peers);
+    peers.insert(
         server_name.to_string(),
         XtcpDirectPeer {
             candidate,
-            updated_at: Instant::now(),
+            updated_at: now,
         },
     );
 }
 
 async fn clear_xtcp_direct_peer(state: &ClientState, server_name: &str) {
     state.xtcp_direct_peers.lock().await.remove(server_name);
+}
+
+fn prune_instant_cache(cache: &mut HashMap<String, Instant>, ttl: Duration, now: Instant) {
+    cache.retain(|_, updated_at| now.duration_since(*updated_at) <= ttl);
+}
+
+fn trim_oldest_instant_cache(cache: &mut HashMap<String, Instant>, limit: usize) {
+    while cache.len() >= limit {
+        let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, updated_at)| **updated_at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        cache.remove(&oldest);
+    }
+}
+
+fn prune_xtcp_direct_peer_cache(cache: &mut HashMap<String, XtcpDirectPeer>, now: Instant) {
+    cache.retain(|_, peer| now.duration_since(peer.updated_at) <= XTCP_DIRECT_PEER_TTL);
+}
+
+fn trim_oldest_xtcp_direct_peer_cache(cache: &mut HashMap<String, XtcpDirectPeer>) {
+    while cache.len() >= XTCP_DIRECT_PEER_LIMIT {
+        let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, peer)| peer.updated_at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        cache.remove(&oldest);
+    }
 }
 
 async fn connect_xtcp_direct_peer(
@@ -1769,11 +1811,11 @@ async fn should_skip_sudp_direct(state: &ClientState, session_id: &str) -> bool 
 }
 
 async fn mark_sudp_direct_failure(state: &ClientState, session_id: &str) {
-    state
-        .sudp_direct_failures
-        .lock()
-        .await
-        .insert(session_id.to_string(), Instant::now());
+    let now = Instant::now();
+    let mut failures = state.sudp_direct_failures.lock().await;
+    prune_instant_cache(&mut failures, SUDP_DIRECT_FAILURE_TTL, now);
+    trim_oldest_instant_cache(&mut failures, SUDP_DIRECT_FAILURE_LIMIT);
+    failures.insert(session_id.to_string(), now);
 }
 
 async fn clear_sudp_direct_failure(state: &ClientState, session_id: &str) {
@@ -1790,6 +1832,60 @@ async fn take_fresh_sudp_direct_peer(state: &ClientState, session_id: &str) -> O
     drop(peers);
     state.sudp_direct_confirmed.lock().await.remove(session_id);
     None
+}
+
+async fn record_sudp_direct_peer(state: &ClientState, session_id: &str, addr: SocketAddr) {
+    let now = Instant::now();
+    let removed = {
+        let mut peers = state.sudp_direct_visitor_peers.lock().await;
+        let mut removed = prune_sudp_direct_peer_cache(&mut peers, now);
+        removed.extend(trim_oldest_sudp_direct_peer_cache(&mut peers));
+        peers.insert(
+            session_id.to_string(),
+            SudpDirectPeer {
+                addr,
+                updated_at: now,
+            },
+        );
+        removed
+    };
+    if !removed.is_empty() {
+        let mut confirmed = state.sudp_direct_confirmed.lock().await;
+        for session_id in removed {
+            confirmed.remove(&session_id);
+        }
+    }
+}
+
+fn prune_sudp_direct_peer_cache(
+    cache: &mut HashMap<String, SudpDirectPeer>,
+    now: Instant,
+) -> Vec<String> {
+    let expired = cache
+        .iter()
+        .filter(|(_, peer)| now.duration_since(peer.updated_at) > SUDP_DIRECT_PEER_TTL)
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    for key in &expired {
+        cache.remove(key);
+    }
+    expired
+}
+
+fn trim_oldest_sudp_direct_peer_cache(cache: &mut HashMap<String, SudpDirectPeer>) -> Vec<String> {
+    let mut removed = Vec::new();
+    while cache.len() >= SUDP_DIRECT_PEER_LIMIT {
+        let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, peer)| peer.updated_at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        cache.remove(&oldest);
+        removed.push(oldest);
+    }
+    removed
 }
 
 async fn send_sudp_direct_probe(
@@ -2023,13 +2119,7 @@ fn spawn_sudp_direct_visitor_response_loop(
             if response_session_id != session_id || proxy_name != expected_proxy_name {
                 continue;
             }
-            state.sudp_direct_visitor_peers.lock().await.insert(
-                session_id.clone(),
-                SudpDirectPeer {
-                    addr: peer,
-                    updated_at: Instant::now(),
-                },
-            );
+            record_sudp_direct_peer(&state, &session_id, peer).await;
             if let Err(err) = flush_sudp_direct_pending(&state, &session_id, &socket, peer).await {
                 debug!("sudp direct pending flush failed: {err:#}");
                 continue;
@@ -3939,6 +4029,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn xtcp_direct_failures_are_bounded_and_prune_expired_entries() {
+        let (state, _server) = test_state();
+        state.xtcp_direct_failures.lock().await.insert(
+            "expired-xtcp".to_string(),
+            Instant::now() - XTCP_DIRECT_FAILURE_TTL - Duration::from_secs(1),
+        );
+
+        for idx in 0..=XTCP_DIRECT_FAILURE_LIMIT {
+            mark_xtcp_direct_failure(&state, &format!("xtcp-fail-{idx}")).await;
+        }
+
+        let failures = state.xtcp_direct_failures.lock().await;
+        assert_eq!(failures.len(), XTCP_DIRECT_FAILURE_LIMIT);
+        assert!(!failures.contains_key("expired-xtcp"));
+        assert!(!failures.contains_key("xtcp-fail-0"));
+        assert!(failures.contains_key(&format!("xtcp-fail-{XTCP_DIRECT_FAILURE_LIMIT}")));
+    }
+
+    #[tokio::test]
+    async fn xtcp_direct_peers_are_bounded_and_prune_expired_entries() {
+        let (state, _server) = test_state();
+        state.xtcp_direct_peers.lock().await.insert(
+            "expired-xtcp-peer".to_string(),
+            XtcpDirectPeer {
+                candidate: "127.0.0.1:10000".to_string(),
+                updated_at: Instant::now() - XTCP_DIRECT_PEER_TTL - Duration::from_secs(1),
+            },
+        );
+
+        for idx in 0..=XTCP_DIRECT_PEER_LIMIT {
+            record_xtcp_direct_peer(
+                &state,
+                &format!("xtcp-peer-{idx}"),
+                format!("127.0.0.1:{}", 20000 + idx),
+            )
+            .await;
+        }
+
+        let peers = state.xtcp_direct_peers.lock().await;
+        assert_eq!(peers.len(), XTCP_DIRECT_PEER_LIMIT);
+        assert!(!peers.contains_key("expired-xtcp-peer"));
+        assert!(!peers.contains_key("xtcp-peer-0"));
+        assert!(peers.contains_key(&format!("xtcp-peer-{XTCP_DIRECT_PEER_LIMIT}")));
+    }
+
+    #[tokio::test]
     async fn xtcp_direct_recent_failure_skips_nat_lookup() {
         let (state, mut server) = test_state();
         mark_xtcp_direct_failure(&state, "cached-bad-xtcp").await;
@@ -4578,6 +4714,66 @@ mod tests {
             Err(_) | Ok(Err(_)) => {}
             Ok(Ok(other)) => panic!("recent sudp failure still performed NAT lookup: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn sudp_direct_failures_are_bounded_and_prune_expired_entries() {
+        let (state, _server) = test_state();
+        state.sudp_direct_failures.lock().await.insert(
+            "expired-sudp".to_string(),
+            Instant::now() - SUDP_DIRECT_FAILURE_TTL - Duration::from_secs(1),
+        );
+
+        for idx in 0..=SUDP_DIRECT_FAILURE_LIMIT {
+            mark_sudp_direct_failure(&state, &format!("sudp-fail-{idx}")).await;
+        }
+
+        let failures = state.sudp_direct_failures.lock().await;
+        assert_eq!(failures.len(), SUDP_DIRECT_FAILURE_LIMIT);
+        assert!(!failures.contains_key("expired-sudp"));
+        assert!(!failures.contains_key("sudp-fail-0"));
+        assert!(failures.contains_key(&format!("sudp-fail-{SUDP_DIRECT_FAILURE_LIMIT}")));
+    }
+
+    #[tokio::test]
+    async fn sudp_direct_peers_are_bounded_and_prune_expired_entries() {
+        let (state, _server) = test_state();
+        state.sudp_direct_visitor_peers.lock().await.insert(
+            "expired-sudp-peer".to_string(),
+            SudpDirectPeer {
+                addr: "127.0.0.1:10000".parse().unwrap(),
+                updated_at: Instant::now() - SUDP_DIRECT_PEER_TTL - Duration::from_secs(1),
+            },
+        );
+        state
+            .sudp_direct_confirmed
+            .lock()
+            .await
+            .insert("expired-sudp-peer".to_string());
+
+        for idx in 0..=SUDP_DIRECT_PEER_LIMIT {
+            let session_id = format!("sudp-peer-{idx}");
+            record_sudp_direct_peer(
+                &state,
+                &session_id,
+                format!("127.0.0.1:{}", 30000 + idx).parse().unwrap(),
+            )
+            .await;
+            if idx == 0 {
+                state.sudp_direct_confirmed.lock().await.insert(session_id);
+            }
+        }
+
+        let peers = state.sudp_direct_visitor_peers.lock().await;
+        assert_eq!(peers.len(), SUDP_DIRECT_PEER_LIMIT);
+        assert!(!peers.contains_key("expired-sudp-peer"));
+        assert!(!peers.contains_key("sudp-peer-0"));
+        assert!(peers.contains_key(&format!("sudp-peer-{SUDP_DIRECT_PEER_LIMIT}")));
+        drop(peers);
+
+        let confirmed = state.sudp_direct_confirmed.lock().await;
+        assert!(!confirmed.contains("expired-sudp-peer"));
+        assert!(!confirmed.contains("sudp-peer-0"));
     }
 
     #[tokio::test]
