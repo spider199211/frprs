@@ -51,7 +51,7 @@ struct ClientState {
     sudp_direct_confirmed: Arc<Mutex<HashSet<String>>>,
     sudp_direct_probe_sessions: Arc<Mutex<HashSet<String>>>,
     sudp_direct_failures: Arc<Mutex<HashMap<String, Instant>>>,
-    nat_hole_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<NatHoleResponse>>>>,
+    nat_hole_waiters: Arc<Mutex<HashMap<String, Vec<oneshot::Sender<NatHoleResponse>>>>>,
     nat_hole_cached: Arc<Mutex<HashMap<String, NatHoleCachedResponse>>>,
     nat_hole_waiting: Arc<Mutex<HashMap<String, Instant>>>,
     xtcp_direct_failures: Arc<Mutex<HashMap<String, Instant>>>,
@@ -529,8 +529,10 @@ async fn handle_nat_hole_response(
     resp: NatHoleResponse,
 ) {
     let key = nat_hole_waiter_key(&transaction_id, &role);
-    if let Some(waiter) = state.nat_hole_waiters.lock().await.remove(&key) {
-        let _ = waiter.send(resp);
+    if let Some(waiters) = state.nat_hole_waiters.lock().await.remove(&key) {
+        for waiter in waiters {
+            let _ = waiter.send(resp.clone());
+        }
         return;
     }
     if resp.waiting || !resp.error.is_empty() {
@@ -603,7 +605,7 @@ async fn request_nat_hole(
     }
 
     let (tx, rx) = oneshot::channel();
-    state.nat_hole_waiters.lock().await.insert(key.clone(), tx);
+    add_nat_hole_waiter(state, key.clone(), tx).await;
     let send_result = state
         .send(&Message::NatHoleRegister {
             transaction_id: transaction_id.to_string(),
@@ -620,7 +622,7 @@ async fn request_nat_hole(
     let resp = match time::timeout(Duration::from_secs(5), rx).await {
         Ok(resp) => resp.context("nat hole response channel closed")?,
         Err(err) => {
-            state.nat_hole_waiters.lock().await.remove(&key);
+            remove_closed_nat_hole_waiters(state, &key).await;
             return Err(err).context("wait for nat hole response timed out");
         }
     };
@@ -659,7 +661,7 @@ async fn request_nat_hole_with_grace(
     }
 
     let (tx, rx) = oneshot::channel();
-    state.nat_hole_waiters.lock().await.insert(key.clone(), tx);
+    add_nat_hole_waiter(state, key.clone(), tx).await;
     match time::timeout(grace, rx).await {
         Ok(Ok(resp)) => {
             if !resp.error.is_empty() {
@@ -674,12 +676,36 @@ async fn request_nat_hole_with_grace(
             Ok(resp)
         }
         Ok(Err(_)) => {
-            state.nat_hole_waiters.lock().await.remove(&key);
+            remove_closed_nat_hole_waiters(state, &key).await;
             Ok(resp)
         }
         Err(_) => {
-            state.nat_hole_waiters.lock().await.remove(&key);
+            remove_closed_nat_hole_waiters(state, &key).await;
             Ok(resp)
+        }
+    }
+}
+
+async fn add_nat_hole_waiter(
+    state: &ClientState,
+    key: String,
+    tx: oneshot::Sender<NatHoleResponse>,
+) {
+    state
+        .nat_hole_waiters
+        .lock()
+        .await
+        .entry(key)
+        .or_default()
+        .push(tx);
+}
+
+async fn remove_closed_nat_hole_waiters(state: &ClientState, key: &str) {
+    let mut waiters = state.nat_hole_waiters.lock().await;
+    if let Some(entries) = waiters.get_mut(key) {
+        entries.retain(|tx| !tx.is_closed());
+        if entries.is_empty() {
+            waiters.remove(key);
         }
     }
 }
@@ -3048,6 +3074,112 @@ mod tests {
         assert!(!resp.waiting);
         assert_eq!(resp.peer_observed_addr, "127.0.0.1:7001");
         assert_eq!(resp.peer_local_addrs, vec!["10.0.0.10:10001"]);
+    }
+
+    #[tokio::test]
+    async fn concurrent_nat_hole_waiters_share_async_notification() {
+        let (state, mut server) = test_state();
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            request_nat_hole_with_grace(
+                &first_state,
+                "xtcp-concurrent",
+                "xtcp-concurrent",
+                "visitor",
+                Vec::new(),
+                Duration::from_secs(1),
+            )
+            .await
+        });
+        let second_state = state.clone();
+        let second = tokio::spawn(async move {
+            request_nat_hole_with_grace(
+                &second_state,
+                "xtcp-concurrent",
+                "xtcp-concurrent",
+                "visitor",
+                Vec::new(),
+                Duration::from_secs(1),
+            )
+            .await
+        });
+
+        for _ in 0..2 {
+            match time::timeout(Duration::from_secs(1), read_msg(&mut server))
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                Message::NatHoleRegister {
+                    transaction_id,
+                    proxy_name,
+                    role,
+                    ..
+                } => {
+                    assert_eq!(transaction_id, "xtcp-concurrent");
+                    assert_eq!(proxy_name, "xtcp-concurrent");
+                    assert_eq!(role, "visitor");
+                }
+                other => panic!("unexpected nat hole register: {other:?}"),
+            }
+        }
+
+        handle_nat_hole_response(
+            &state,
+            "xtcp-concurrent".to_string(),
+            "xtcp-concurrent".to_string(),
+            "visitor".to_string(),
+            NatHoleResponse {
+                peer_observed_addr: String::new(),
+                peer_local_addrs: Vec::new(),
+                waiting: true,
+                error: String::new(),
+            },
+        )
+        .await;
+
+        let key = nat_hole_waiter_key("xtcp-concurrent", "visitor");
+        time::timeout(Duration::from_secs(1), async {
+            loop {
+                let waiter_count = state
+                    .nat_hole_waiters
+                    .lock()
+                    .await
+                    .get(&key)
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                if waiter_count == 2 {
+                    break;
+                }
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("concurrent requests did not both enter grace wait");
+
+        handle_nat_hole_response(
+            &state,
+            "xtcp-concurrent".to_string(),
+            "xtcp-concurrent".to_string(),
+            "visitor".to_string(),
+            NatHoleResponse {
+                peer_observed_addr: "127.0.0.1:7001".to_string(),
+                peer_local_addrs: vec!["10.0.0.10:10001".to_string()],
+                waiting: false,
+                error: String::new(),
+            },
+        )
+        .await;
+
+        for response in [
+            first.await.unwrap().unwrap(),
+            second.await.unwrap().unwrap(),
+        ] {
+            assert!(!response.waiting);
+            assert_eq!(response.peer_observed_addr, "127.0.0.1:7001");
+            assert_eq!(response.peer_local_addrs, vec!["10.0.0.10:10001"]);
+        }
+        assert!(!state.nat_hole_waiters.lock().await.contains_key(&key));
     }
 
     #[tokio::test]
