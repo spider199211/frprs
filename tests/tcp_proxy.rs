@@ -8,7 +8,10 @@ use frprs::{
     protocol::{read_msg, write_msg, Message, UdpPacketFrame},
     server,
 };
-use std::{net::TcpListener as StdTcpListener, sync::OnceLock};
+use std::{
+    net::{TcpListener as StdTcpListener, UdpSocket as StdUdpSocket},
+    sync::OnceLock,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
@@ -25,6 +28,11 @@ async fn acquire_test_lock() -> MutexGuard<'static, ()> {
 fn unused_port() -> u16 {
     let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap().port()
+}
+
+fn unused_udp_port() -> u16 {
+    let socket = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.local_addr().unwrap().port()
 }
 
 async fn connect_with_retry(addr: String) -> TcpStream {
@@ -2892,7 +2900,7 @@ async fn udp_proxy_forwards_packets() {
     });
 
     let bind_port = unused_port();
-    let remote_port = unused_port();
+    let remote_port = unused_udp_port();
     let server_cfg = ServerConfig {
         bind_addr: "127.0.0.1".to_string(),
         bind_port,
@@ -2984,7 +2992,7 @@ async fn udp_group_load_balances_between_members() {
     });
 
     let bind_port = unused_port();
-    let remote_port = unused_port();
+    let remote_port = unused_udp_port();
     let dashboard_port = unused_port();
     let server_cfg = ServerConfig {
         bind_addr: "127.0.0.1".to_string(),
@@ -3100,7 +3108,7 @@ async fn udp_group_load_balances_between_members() {
 async fn udp_proxy_batches_visitor_packets_to_client() {
     let _guard = acquire_test_lock().await;
     let bind_port = unused_port();
-    let remote_port = unused_port();
+    let remote_port = unused_udp_port();
     let server_cfg = ServerConfig {
         bind_addr: "127.0.0.1".to_string(),
         bind_port,
@@ -3205,7 +3213,7 @@ async fn udp_proxy_batches_visitor_packets_to_client() {
 async fn udp_group_batches_visitor_packets_to_each_member() {
     let _guard = acquire_test_lock().await;
     let bind_port = unused_port();
-    let remote_port = unused_port();
+    let remote_port = unused_udp_port();
     let server_cfg = ServerConfig {
         bind_addr: "127.0.0.1".to_string(),
         bind_port,
@@ -3623,7 +3631,7 @@ async fn client_udp_batch_reuses_local_session() {
 async fn server_udp_batch_reuses_visitor_destination() {
     let _guard = acquire_test_lock().await;
     let bind_port = unused_port();
-    let remote_port = unused_port();
+    let remote_port = unused_udp_port();
     let server_cfg = ServerConfig {
         bind_addr: "127.0.0.1".to_string(),
         bind_port,

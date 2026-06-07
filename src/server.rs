@@ -199,9 +199,9 @@ impl Control {
 }
 
 impl WorkPool {
-    fn new() -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
-            queue: Mutex::new(VecDeque::new()),
+            queue: Mutex::new(VecDeque::with_capacity(capacity)),
             notify: Notify::new(),
             queued: AtomicUsize::new(0),
             pending: AtomicUsize::new(0),
@@ -617,7 +617,7 @@ async fn register_control(
         peer_addr: peer,
         pool_count,
         writer: Mutex::new(writer),
-        work_pool: WorkPool::new(),
+        work_pool: WorkPool::new(pool_count),
     });
 
     {
@@ -4039,7 +4039,7 @@ mod tests {
             peer_addr: "127.0.0.1:1".parse().unwrap(),
             pool_count,
             writer: Mutex::new(writer),
-            work_pool: WorkPool::new(),
+            work_pool: WorkPool::new(pool_count),
         });
         (control, server)
     }
@@ -4379,6 +4379,12 @@ mod tests {
         assert!(groups.contains("\"protocol\":\"sudp\""));
         assert!(groups.contains("\"group\":\"sudp-group\""));
         assert!(groups.contains("\"member_count\":2"));
+    }
+
+    #[tokio::test]
+    async fn work_pool_preallocates_configured_queue_capacity() {
+        let pool = WorkPool::new(8);
+        assert!(pool.queue.lock().await.capacity() >= 8);
     }
 
     #[tokio::test]
