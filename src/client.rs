@@ -39,6 +39,7 @@ const SUDP_DIRECT_FAILURE_TTL: Duration = Duration::from_secs(5);
 const SUDP_DIRECT_FAILURE_LIMIT: usize = 1024;
 const SUDP_DIRECT_PEER_TTL: Duration = Duration::from_secs(30);
 const SUDP_DIRECT_PEER_LIMIT: usize = 1024;
+const SUDP_DIRECT_SESSION_LIMIT: usize = 1024;
 const SUDP_DIRECT_PENDING_LIMIT: usize = 64;
 const UDP_PACKET_BATCH_LIMIT: usize = 32;
 const UDP_PACKET_BATCH_WAIT: Duration = Duration::from_millis(2);
@@ -52,6 +53,8 @@ struct ClientState {
     sudp_visitor_sessions: Arc<Mutex<HashMap<String, SudpVisitorSession>>>,
     sudp_direct_owner_sockets: Arc<Mutex<HashMap<String, Arc<UdpSocket>>>>,
     sudp_direct_visitor_sockets: Arc<Mutex<HashMap<String, Arc<UdpSocket>>>>,
+    sudp_direct_visitor_sessions: Arc<Mutex<HashMap<String, Instant>>>,
+    sudp_direct_visitor_tasks: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     sudp_direct_visitor_peers: Arc<Mutex<HashMap<String, SudpDirectPeer>>>,
     sudp_direct_pending: Arc<Mutex<HashMap<String, VecDeque<DirectSudpFrame>>>>,
     sudp_direct_confirmed: Arc<Mutex<HashSet<String>>>,
@@ -230,6 +233,8 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
         sudp_visitor_sessions: Arc::new(Mutex::new(HashMap::new())),
         sudp_direct_owner_sockets: Arc::new(Mutex::new(HashMap::new())),
         sudp_direct_visitor_sockets: Arc::new(Mutex::new(HashMap::new())),
+        sudp_direct_visitor_sessions: Arc::new(Mutex::new(HashMap::new())),
+        sudp_direct_visitor_tasks: Arc::new(Mutex::new(HashMap::new())),
         sudp_direct_visitor_peers: Arc::new(Mutex::new(HashMap::new())),
         sudp_direct_pending: Arc::new(Mutex::new(HashMap::new())),
         sudp_direct_confirmed: Arc::new(Mutex::new(HashSet::new())),
@@ -2053,6 +2058,78 @@ async fn remove_sudp_pending_payload(state: &ClientState, session_id: &str, cont
     }
 }
 
+async fn touch_sudp_direct_visitor_session(state: &ClientState, session_id: &str) {
+    state
+        .sudp_direct_visitor_sessions
+        .lock()
+        .await
+        .insert(session_id.to_string(), Instant::now());
+}
+
+async fn enforce_sudp_direct_visitor_session_limit(state: &ClientState, keep_session_id: &str) {
+    loop {
+        let evicted = {
+            let mut sessions = state.sudp_direct_visitor_sessions.lock().await;
+            if sessions.len() <= SUDP_DIRECT_SESSION_LIMIT {
+                return;
+            }
+            let oldest = sessions
+                .iter()
+                .filter(|(session_id, _)| session_id.as_str() != keep_session_id)
+                .min_by_key(|(_, updated_at)| **updated_at)
+                .map(|(session_id, _)| session_id.clone());
+            if let Some(oldest) = &oldest {
+                sessions.remove(oldest);
+            }
+            oldest
+        };
+        let Some(evicted) = evicted else {
+            return;
+        };
+        remove_sudp_direct_visitor_session_state(state, &evicted, true).await;
+    }
+}
+
+async fn remove_sudp_direct_visitor_session_state(
+    state: &ClientState,
+    session_id: &str,
+    abort_task: bool,
+) {
+    if let Some(task) = state
+        .sudp_direct_visitor_tasks
+        .lock()
+        .await
+        .remove(session_id)
+    {
+        if abort_task {
+            task.abort();
+        }
+    }
+    state
+        .sudp_direct_visitor_sessions
+        .lock()
+        .await
+        .remove(session_id);
+    state
+        .sudp_direct_visitor_sockets
+        .lock()
+        .await
+        .remove(session_id);
+    state
+        .sudp_direct_visitor_peers
+        .lock()
+        .await
+        .remove(session_id);
+    state.sudp_direct_pending.lock().await.remove(session_id);
+    state.sudp_direct_confirmed.lock().await.remove(session_id);
+    state
+        .sudp_direct_probe_sessions
+        .lock()
+        .await
+        .remove(session_id);
+    state.sudp_direct_failures.lock().await.remove(session_id);
+}
+
 async fn sudp_direct_visitor_socket(
     state: &ClientState,
     visitor: &VisitorConfig,
@@ -2065,6 +2142,10 @@ async fn sudp_direct_visitor_socket(
         .get(session_id)
         .cloned()
     {
+        touch_sudp_direct_visitor_session(state, session_id).await;
+        ensure_sudp_direct_visitor_task(state, session_id, &visitor.server_name, socket.clone())
+            .await;
+        enforce_sudp_direct_visitor_session_limit(state, session_id).await;
         return Ok(socket);
     }
 
@@ -2079,16 +2160,32 @@ async fn sudp_direct_visitor_socket(
             existing.clone()
         } else {
             sockets.insert(session_id.to_string(), socket.clone());
-            spawn_sudp_direct_visitor_response_loop(
-                state.clone(),
-                session_id.to_string(),
-                visitor.server_name.clone(),
-                socket.clone(),
-            );
             socket
         }
     };
+    touch_sudp_direct_visitor_session(state, session_id).await;
+    ensure_sudp_direct_visitor_task(state, session_id, &visitor.server_name, socket.clone()).await;
+    enforce_sudp_direct_visitor_session_limit(state, session_id).await;
     Ok(socket)
+}
+
+async fn ensure_sudp_direct_visitor_task(
+    state: &ClientState,
+    session_id: &str,
+    expected_proxy_name: &str,
+    socket: Arc<UdpSocket>,
+) {
+    let mut tasks = state.sudp_direct_visitor_tasks.lock().await;
+    if tasks.contains_key(session_id) {
+        return;
+    }
+    let task = spawn_sudp_direct_visitor_response_loop(
+        state.clone(),
+        session_id.to_string(),
+        expected_proxy_name.to_string(),
+        socket,
+    );
+    tasks.insert(session_id.to_string(), task);
 }
 
 fn spawn_sudp_direct_visitor_response_loop(
@@ -2096,7 +2193,7 @@ fn spawn_sudp_direct_visitor_response_loop(
     session_id: String,
     expected_proxy_name: String,
     socket: Arc<UdpSocket>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut buf = vec![0_u8; 64 * 1024];
         loop {
@@ -2121,6 +2218,7 @@ fn spawn_sudp_direct_visitor_response_loop(
             if response_session_id != session_id || proxy_name != expected_proxy_name {
                 continue;
             }
+            touch_sudp_direct_visitor_session(&state, &session_id).await;
             record_sudp_direct_peer(&state, &session_id, peer).await;
             if let Err(err) = flush_sudp_direct_pending(&state, &session_id, &socket, peer).await {
                 debug!("sudp direct pending flush failed: {err:#}");
@@ -2144,28 +2242,17 @@ fn spawn_sudp_direct_visitor_response_loop(
             }
         }
 
-        let mut sockets = state.sudp_direct_visitor_sockets.lock().await;
-        if sockets
+        let owns_session = state
+            .sudp_direct_visitor_sockets
+            .lock()
+            .await
             .get(&session_id)
             .map(|current| Arc::ptr_eq(current, &socket))
-            .unwrap_or(false)
-        {
-            sockets.remove(&session_id);
+            .unwrap_or(false);
+        if owns_session {
+            remove_sudp_direct_visitor_session_state(&state, &session_id, false).await;
         }
-        state
-            .sudp_direct_visitor_peers
-            .lock()
-            .await
-            .remove(&session_id);
-        state.sudp_direct_pending.lock().await.remove(&session_id);
-        state.sudp_direct_confirmed.lock().await.remove(&session_id);
-        state
-            .sudp_direct_probe_sessions
-            .lock()
-            .await
-            .remove(&session_id);
-        state.sudp_direct_failures.lock().await.remove(&session_id);
-    });
+    })
 }
 
 async fn flush_sudp_direct_pending(
@@ -2782,6 +2869,8 @@ mod tests {
             sudp_visitor_sessions: Arc::new(Mutex::new(HashMap::new())),
             sudp_direct_owner_sockets: Arc::new(Mutex::new(HashMap::new())),
             sudp_direct_visitor_sockets: Arc::new(Mutex::new(HashMap::new())),
+            sudp_direct_visitor_sessions: Arc::new(Mutex::new(HashMap::new())),
+            sudp_direct_visitor_tasks: Arc::new(Mutex::new(HashMap::new())),
             sudp_direct_visitor_peers: Arc::new(Mutex::new(HashMap::new())),
             sudp_direct_pending: Arc::new(Mutex::new(HashMap::new())),
             sudp_direct_confirmed: Arc::new(Mutex::new(HashSet::new())),
@@ -4813,6 +4902,116 @@ mod tests {
         let confirmed = state.sudp_direct_confirmed.lock().await;
         assert!(!confirmed.contains("expired-sudp-peer"));
         assert!(!confirmed.contains("sudp-peer-0"));
+    }
+
+    #[tokio::test]
+    async fn sudp_direct_visitor_sessions_are_bounded_and_evict_oldest_state() {
+        let (state, _server) = test_state();
+        let visitor = VisitorConfig {
+            name: "local-sudp".to_string(),
+            visitor_type: ProxyType::Sudp,
+            server_name: "sudp-echo".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+        let first_session = "sudp-session-0".to_string();
+
+        for idx in 0..=SUDP_DIRECT_SESSION_LIMIT {
+            let session_id = format!("sudp-session-{idx}");
+            sudp_direct_visitor_socket(&state, &visitor, &session_id)
+                .await
+                .unwrap();
+            if idx == 0 {
+                state
+                    .sudp_direct_visitor_sessions
+                    .lock()
+                    .await
+                    .insert(session_id.clone(), Instant::now() - Duration::from_secs(1));
+                state
+                    .sudp_direct_pending
+                    .lock()
+                    .await
+                    .insert(session_id.clone(), VecDeque::new());
+                state
+                    .sudp_direct_confirmed
+                    .lock()
+                    .await
+                    .insert(session_id.clone());
+                state
+                    .sudp_direct_probe_sessions
+                    .lock()
+                    .await
+                    .insert(session_id.clone());
+                mark_sudp_direct_failure(&state, &session_id).await;
+                record_sudp_direct_peer(&state, &session_id, "127.0.0.1:10000".parse().unwrap())
+                    .await;
+            }
+        }
+
+        assert_eq!(
+            state.sudp_direct_visitor_sessions.lock().await.len(),
+            SUDP_DIRECT_SESSION_LIMIT
+        );
+        assert_eq!(
+            state.sudp_direct_visitor_sockets.lock().await.len(),
+            SUDP_DIRECT_SESSION_LIMIT
+        );
+        assert_eq!(
+            state.sudp_direct_visitor_tasks.lock().await.len(),
+            SUDP_DIRECT_SESSION_LIMIT
+        );
+        assert!(!state
+            .sudp_direct_visitor_sessions
+            .lock()
+            .await
+            .contains_key(&first_session));
+        assert!(!state
+            .sudp_direct_visitor_sockets
+            .lock()
+            .await
+            .contains_key(&first_session));
+        assert!(!state
+            .sudp_direct_visitor_peers
+            .lock()
+            .await
+            .contains_key(&first_session));
+        assert!(!state
+            .sudp_direct_pending
+            .lock()
+            .await
+            .contains_key(&first_session));
+        assert!(!state
+            .sudp_direct_confirmed
+            .lock()
+            .await
+            .contains(&first_session));
+        assert!(!state
+            .sudp_direct_probe_sessions
+            .lock()
+            .await
+            .contains(&first_session));
+        assert!(!state
+            .sudp_direct_failures
+            .lock()
+            .await
+            .contains_key(&first_session));
+        assert!(state
+            .sudp_direct_visitor_sessions
+            .lock()
+            .await
+            .contains_key(&format!("sudp-session-{SUDP_DIRECT_SESSION_LIMIT}")));
+
+        let remaining = state
+            .sudp_direct_visitor_sessions
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for session_id in remaining {
+            remove_sudp_direct_visitor_session_state(&state, &session_id, true).await;
+        }
     }
 
     #[tokio::test]
