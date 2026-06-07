@@ -528,8 +528,8 @@ async fn close_proxy(state: &ClientState, proxy_name: &str) -> Result<()> {
         .await
 }
 
-fn nat_hole_waiter_key(transaction_id: &str, role: &str) -> String {
-    format!("{transaction_id}|{role}")
+fn nat_hole_waiter_key(transaction_id: &str, proxy_name: &str, role: &str) -> String {
+    format!("{transaction_id}|{proxy_name}|{role}")
 }
 
 async fn handle_nat_hole_response(
@@ -539,7 +539,7 @@ async fn handle_nat_hole_response(
     role: String,
     resp: NatHoleResponse,
 ) {
-    let key = nat_hole_waiter_key(&transaction_id, &role);
+    let key = nat_hole_waiter_key(&transaction_id, &proxy_name, &role);
     if let Some(waiters) = state.nat_hole_waiters.lock().await.remove(&key) {
         for waiter in waiters {
             let _ = waiter.send(resp.clone());
@@ -597,7 +597,7 @@ async fn request_nat_hole(
     role: &str,
     local_addrs: Vec<String>,
 ) -> Result<NatHoleResponse> {
-    let key = nat_hole_waiter_key(transaction_id, role);
+    let key = nat_hole_waiter_key(transaction_id, proxy_name, role);
     if let Some(resp) = take_cached_nat_hole_response(state, &key).await {
         if !resp.error.is_empty() {
             bail!("nat hole register failed: {}", resp.error);
@@ -666,7 +666,7 @@ async fn request_nat_hole_with_grace(
         return Ok(resp);
     }
 
-    let key = nat_hole_waiter_key(transaction_id, role);
+    let key = nat_hole_waiter_key(transaction_id, proxy_name, role);
     if let Some(resp) = take_cached_nat_hole_response(state, &key).await {
         if !resp.error.is_empty() {
             bail!("nat hole register failed: {}", resp.error);
@@ -3046,7 +3046,7 @@ mod tests {
             .nat_hole_cached
             .lock()
             .await
-            .remove(&nat_hole_waiter_key("tx-cache", "server"))
+            .remove(&nat_hole_waiter_key("tx-cache", "xtcp-ssh", "server"))
             .unwrap();
         assert_eq!(cached.resp.peer_observed_addr, "127.0.0.1:7002");
         assert_eq!(cached.resp.peer_local_addrs, vec!["10.0.0.20:10002"]);
@@ -3056,7 +3056,7 @@ mod tests {
     async fn request_nat_hole_consumes_cached_response() {
         let (state, _server) = test_state();
         state.nat_hole_cached.lock().await.insert(
-            nat_hole_waiter_key("tx-cache", "visitor"),
+            nat_hole_waiter_key("tx-cache", "xtcp-ssh", "visitor"),
             NatHoleCachedResponse {
                 resp: NatHoleResponse {
                     peer_observed_addr: "127.0.0.1:7001".to_string(),
@@ -3084,7 +3084,79 @@ mod tests {
             .nat_hole_cached
             .lock()
             .await
-            .contains_key(&nat_hole_waiter_key("tx-cache", "visitor")));
+            .contains_key(&nat_hole_waiter_key("tx-cache", "xtcp-ssh", "visitor")));
+    }
+
+    #[tokio::test]
+    async fn nat_hole_response_wrong_proxy_does_not_satisfy_waiter() {
+        let (state, mut server) = test_state();
+        let request_state = state.clone();
+        let request = tokio::spawn(async move {
+            request_nat_hole(
+                &request_state,
+                "tx-proxy-bound",
+                "xtcp-right",
+                "visitor",
+                Vec::new(),
+            )
+            .await
+        });
+
+        match time::timeout(Duration::from_secs(1), read_msg(&mut server))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Message::NatHoleRegister {
+                transaction_id,
+                proxy_name,
+                role,
+                ..
+            } => {
+                assert_eq!(transaction_id, "tx-proxy-bound");
+                assert_eq!(proxy_name, "xtcp-right");
+                assert_eq!(role, "visitor");
+            }
+            other => panic!("unexpected nat hole register: {other:?}"),
+        }
+
+        let right_key = nat_hole_waiter_key("tx-proxy-bound", "xtcp-right", "visitor");
+        let wrong_key = nat_hole_waiter_key("tx-proxy-bound", "xtcp-wrong", "visitor");
+        handle_nat_hole_response(
+            &state,
+            "tx-proxy-bound".to_string(),
+            "xtcp-wrong".to_string(),
+            "visitor".to_string(),
+            NatHoleResponse {
+                peer_observed_addr: "127.0.0.1:7002".to_string(),
+                peer_local_addrs: vec!["10.0.0.20:10002".to_string()],
+                waiting: false,
+                error: String::new(),
+            },
+        )
+        .await;
+
+        assert!(state.nat_hole_waiters.lock().await.contains_key(&right_key));
+        assert!(state.nat_hole_cached.lock().await.contains_key(&wrong_key));
+
+        handle_nat_hole_response(
+            &state,
+            "tx-proxy-bound".to_string(),
+            "xtcp-right".to_string(),
+            "visitor".to_string(),
+            NatHoleResponse {
+                peer_observed_addr: "127.0.0.1:7001".to_string(),
+                peer_local_addrs: vec!["10.0.0.10:10001".to_string()],
+                waiting: false,
+                error: String::new(),
+            },
+        )
+        .await;
+
+        let resp = request.await.unwrap().unwrap();
+        assert_eq!(resp.peer_observed_addr, "127.0.0.1:7001");
+        assert_eq!(resp.peer_local_addrs, vec!["10.0.0.10:10001"]);
+        assert!(!state.nat_hole_waiters.lock().await.contains_key(&right_key));
     }
 
     #[tokio::test]
@@ -3093,7 +3165,7 @@ mod tests {
         {
             let mut cached = state.nat_hole_cached.lock().await;
             cached.insert(
-                nat_hole_waiter_key("tx-expired", "visitor"),
+                nat_hole_waiter_key("tx-expired", "xtcp-ssh", "visitor"),
                 NatHoleCachedResponse {
                     resp: NatHoleResponse {
                         peer_observed_addr: "127.0.0.1:7000".to_string(),
@@ -3111,7 +3183,7 @@ mod tests {
         for idx in 0..=NAT_HOLE_CACHED_RESPONSE_LIMIT {
             cache_nat_hole_response(
                 &state,
-                nat_hole_waiter_key(&format!("tx-{idx}"), "visitor"),
+                nat_hole_waiter_key(&format!("tx-{idx}"), "xtcp-ssh", "visitor"),
                 NatHoleResponse {
                     peer_observed_addr: format!("127.0.0.1:{}", 7000 + idx),
                     peer_local_addrs: Vec::new(),
@@ -3124,10 +3196,11 @@ mod tests {
 
         let cached = state.nat_hole_cached.lock().await;
         assert_eq!(cached.len(), NAT_HOLE_CACHED_RESPONSE_LIMIT);
-        assert!(!cached.contains_key(&nat_hole_waiter_key("tx-expired", "visitor")));
-        assert!(!cached.contains_key(&nat_hole_waiter_key("tx-0", "visitor")));
+        assert!(!cached.contains_key(&nat_hole_waiter_key("tx-expired", "xtcp-ssh", "visitor")));
+        assert!(!cached.contains_key(&nat_hole_waiter_key("tx-0", "xtcp-ssh", "visitor")));
         assert!(cached.contains_key(&nat_hole_waiter_key(
             &format!("tx-{NAT_HOLE_CACHED_RESPONSE_LIMIT}"),
+            "xtcp-ssh",
             "visitor"
         )));
     }
@@ -3136,7 +3209,7 @@ mod tests {
     async fn request_nat_hole_ignores_expired_cached_response() {
         let (state, mut server) = test_state();
         state.nat_hole_cached.lock().await.insert(
-            nat_hole_waiter_key("tx-stale", "visitor"),
+            nat_hole_waiter_key("tx-stale", "xtcp-ssh", "visitor"),
             NatHoleCachedResponse {
                 resp: NatHoleResponse {
                     peer_observed_addr: "127.0.0.1:7001".to_string(),
@@ -3315,7 +3388,7 @@ mod tests {
             other => panic!("unexpected nat hole register: {other:?}"),
         }
 
-        let key = nat_hole_waiter_key("xtcp-concurrent", "visitor");
+        let key = nat_hole_waiter_key("xtcp-concurrent", "xtcp-concurrent", "visitor");
         time::timeout(Duration::from_secs(1), async {
             loop {
                 let waiter_count = state
@@ -3400,7 +3473,7 @@ mod tests {
     #[tokio::test]
     async fn nat_hole_waiters_are_bounded_per_key() {
         let (state, _server) = test_state();
-        let key = nat_hole_waiter_key("xtcp-bounded", "visitor");
+        let key = nat_hole_waiter_key("xtcp-bounded", "xtcp-bounded", "visitor");
         let mut receivers = Vec::new();
 
         for idx in 0..NAT_HOLE_WAITER_LIMIT {
@@ -3471,7 +3544,7 @@ mod tests {
 
         let resp = request.await.unwrap().unwrap();
         assert!(resp.waiting);
-        assert!(should_skip_nat_hole_waiting(&state, "xtcp-waiting|visitor").await);
+        assert!(should_skip_nat_hole_waiting(&state, "xtcp-waiting|xtcp-waiting|visitor").await);
 
         let resp = request_nat_hole(
             &state,
@@ -3492,7 +3565,7 @@ mod tests {
     #[tokio::test]
     async fn request_nat_hole_cached_match_bypasses_recent_waiting() {
         let (state, mut server) = test_state();
-        let key = nat_hole_waiter_key("xtcp-waiting", "visitor");
+        let key = nat_hole_waiter_key("xtcp-waiting", "xtcp-waiting", "visitor");
         mark_nat_hole_waiting(&state, &key).await;
         state.nat_hole_cached.lock().await.insert(
             key.clone(),
@@ -4080,7 +4153,7 @@ mod tests {
         let (state, mut server) = test_state();
         let (direct_addr, direct_task) = spawn_xtcp_echo_direct_test_peer(2).await;
         state.nat_hole_cached.lock().await.insert(
-            nat_hole_waiter_key("cached-xtcp", "visitor"),
+            nat_hole_waiter_key("cached-xtcp", "cached-xtcp", "visitor"),
             NatHoleCachedResponse {
                 resp: NatHoleResponse {
                     peer_observed_addr: String::new(),
@@ -4126,7 +4199,7 @@ mod tests {
         let (state, _server) = test_state();
         let (bad_addr, bad_task) = spawn_rejecting_xtcp_direct_test_peer().await;
         state.nat_hole_cached.lock().await.insert(
-            nat_hole_waiter_key("bad-xtcp", "visitor"),
+            nat_hole_waiter_key("bad-xtcp", "bad-xtcp", "visitor"),
             NatHoleCachedResponse {
                 resp: NatHoleResponse {
                     peer_observed_addr: String::new(),
