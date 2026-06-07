@@ -605,18 +605,22 @@ async fn request_nat_hole(
     }
 
     let (tx, rx) = oneshot::channel();
-    add_nat_hole_waiter(state, key.clone(), tx).await;
-    let send_result = state
-        .send(&Message::NatHoleRegister {
-            transaction_id: transaction_id.to_string(),
-            proxy_name: proxy_name.to_string(),
-            role: role.to_string(),
-            local_addrs,
-        })
-        .await;
-    if let Err(err) = send_result {
-        state.nat_hole_waiters.lock().await.remove(&key);
-        return Err(err);
+    let should_send = add_nat_hole_waiter(state, key.clone(), tx).await;
+    if should_send {
+        let send_result = state
+            .send(&Message::NatHoleRegister {
+                transaction_id: transaction_id.to_string(),
+                proxy_name: proxy_name.to_string(),
+                role: role.to_string(),
+                local_addrs,
+            })
+            .await;
+        if let Err(err) = send_result {
+            state.nat_hole_waiters.lock().await.remove(&key);
+            return Err(err);
+        }
+    } else {
+        debug!("coalesced nat hole register for {key} onto existing waiter");
     }
 
     let resp = match time::timeout(Duration::from_secs(5), rx).await {
@@ -690,14 +694,12 @@ async fn add_nat_hole_waiter(
     state: &ClientState,
     key: String,
     tx: oneshot::Sender<NatHoleResponse>,
-) {
-    state
-        .nat_hole_waiters
-        .lock()
-        .await
-        .entry(key)
-        .or_default()
-        .push(tx);
+) -> bool {
+    let mut waiters = state.nat_hole_waiters.lock().await;
+    let entries = waiters.entry(key).or_default();
+    let should_send = entries.is_empty();
+    entries.push(tx);
+    should_send
 }
 
 async fn remove_closed_nat_hole_waiters(state: &ClientState, key: &str) {
@@ -3104,23 +3106,46 @@ mod tests {
             .await
         });
 
-        for _ in 0..2 {
-            match time::timeout(Duration::from_secs(1), read_msg(&mut server))
-                .await
-                .unwrap()
-                .unwrap()
-            {
-                Message::NatHoleRegister {
-                    transaction_id,
-                    proxy_name,
-                    role,
-                    ..
-                } => {
-                    assert_eq!(transaction_id, "xtcp-concurrent");
-                    assert_eq!(proxy_name, "xtcp-concurrent");
-                    assert_eq!(role, "visitor");
+        match time::timeout(Duration::from_secs(1), read_msg(&mut server))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Message::NatHoleRegister {
+                transaction_id,
+                proxy_name,
+                role,
+                ..
+            } => {
+                assert_eq!(transaction_id, "xtcp-concurrent");
+                assert_eq!(proxy_name, "xtcp-concurrent");
+                assert_eq!(role, "visitor");
+            }
+            other => panic!("unexpected nat hole register: {other:?}"),
+        }
+
+        let key = nat_hole_waiter_key("xtcp-concurrent", "visitor");
+        time::timeout(Duration::from_secs(1), async {
+            loop {
+                let waiter_count = state
+                    .nat_hole_waiters
+                    .lock()
+                    .await
+                    .get(&key)
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                if waiter_count == 2 {
+                    break;
                 }
-                other => panic!("unexpected nat hole register: {other:?}"),
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("concurrent requests were not coalesced onto one register");
+        match time::timeout(Duration::from_millis(200), read_msg(&mut server)).await {
+            Err(_) | Ok(Err(_)) => {}
+            Ok(Ok(other)) => {
+                panic!("coalesced nat hole requests sent duplicate register: {other:?}")
             }
         }
 
@@ -3138,7 +3163,6 @@ mod tests {
         )
         .await;
 
-        let key = nat_hole_waiter_key("xtcp-concurrent", "visitor");
         time::timeout(Duration::from_secs(1), async {
             loop {
                 let waiter_count = state
