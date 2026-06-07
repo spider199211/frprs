@@ -8,7 +8,7 @@ This file tracks the Rust rewrite against the upstream `fatedier/frp` feature su
 | TOML config loading | Implemented | Supports frp-style core fields. More legacy and include-file behavior remains. |
 | Token authentication | Implemented | Shared `[auth].token` checked on login, work connections, and ping. |
 | TCP proxy | Implemented | Control connection, work connection request, remote listener, bidirectional forwarding. |
-| UDP proxy | Implemented | Request/response forwarding, local NAT session reuse, bidirectional batching, grouped packet batching, nonblocking batch queues, batch destination caching, batch-path preallocation, server-side batch buffer reuse, throttled datagram plugin-session pruning, and groups are implemented. Deeper packet-path optimizations remain. |
+| UDP proxy | Implemented | Request/response forwarding, local NAT session reuse, bidirectional batching, grouped packet batching, nonblocking batch queues, deadline-based batch windows, batch destination caching, batch-path preallocation, server-side batch buffer reuse, throttled datagram plugin-session pruning, and groups are implemented. Deeper packet-path optimizations remain. |
 | HTTP proxy | Implemented | Routes by `Host`, wildcard domains, `locations`, header rewrite, Basic Auth, real IP headers, and groups. |
 | HTTPS proxy | Implemented | Routes by TLS SNI / `customDomains`, wildcard domains, `*` fallback, groups, and raw passthrough. |
 | Connection pool | Implemented | `poolCount` pre-opens work connections, preallocates the queue by pool size, coalesces replenishment, requests only immediate waiter demand, bounds client-side work-connection dialing, and reuses TCP stream mux/QUIC client sessions for control/work streams. |

@@ -1425,12 +1425,16 @@ fn spawn_udp_packet_batcher(
             };
             queued.clear();
             queued.push(first);
-            time::sleep(UDP_PACKET_BATCH_WAIT).await;
+            let batch_deadline = Instant::now() + UDP_PACKET_BATCH_WAIT;
             while queued.len() < UDP_PACKET_BATCH_LIMIT {
-                let Ok(packet) = packet_rx.try_recv() else {
+                let Some(remaining) = batch_deadline.checked_duration_since(Instant::now()) else {
                     break;
                 };
-                queued.push(packet);
+                match time::timeout(remaining, packet_rx.recv()).await {
+                    Ok(Some(packet)) => queued.push(packet),
+                    Ok(None) => return,
+                    Err(_) => break,
+                };
             }
 
             let per_control_capacity = queued.len();
