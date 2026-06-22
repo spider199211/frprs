@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf},
     net::{TcpListener, TcpSocket, TcpStream, UdpSocket},
     sync::{mpsc, mpsc::error::TrySendError, Mutex, Notify},
     task::JoinHandle,
@@ -28,6 +28,8 @@ use uuid::Uuid;
 const UDP_PACKET_BATCH_LIMIT: usize = 32;
 const UDP_PACKET_BATCH_WAIT: Duration = Duration::from_millis(2);
 const NAT_HOLE_LOCAL_ADDR_LIMIT: usize = 16;
+const RELAY_COPY_BUFFER_SIZE: usize = 64 * 1024;
+const LIMITED_RELAY_COPY_BUFFER_SIZE: usize = 16 * 1024;
 
 #[derive(Clone)]
 struct ServerState {
@@ -3325,16 +3327,25 @@ where
     L: AsyncRead + AsyncWrite + Unpin,
     R: AsyncRead + AsyncWrite + Unpin,
 {
-    if bytes_per_second.is_none() {
-        return io::copy_bidirectional(left, right)
-            .await
-            .context("copy relay streams");
-    }
-
     let (mut left_read, mut left_write) = tokio::io::split(left);
     let (mut right_read, mut right_write) = tokio::io::split(right);
-    let left_to_right = copy_limited(&mut left_read, &mut right_write, bytes_per_second);
-    let right_to_left = copy_limited(&mut right_read, &mut left_write, bytes_per_second);
+    let buffer_size = if bytes_per_second.is_some() {
+        LIMITED_RELAY_COPY_BUFFER_SIZE
+    } else {
+        RELAY_COPY_BUFFER_SIZE
+    };
+    let left_to_right = copy_limited(
+        &mut left_read,
+        &mut right_write,
+        bytes_per_second,
+        buffer_size,
+    );
+    let right_to_left = copy_limited(
+        &mut right_read,
+        &mut left_write,
+        bytes_per_second,
+        buffer_size,
+    );
     let (up, down) = tokio::try_join!(left_to_right, right_to_left)?;
     Ok((up, down))
 }
@@ -3343,12 +3354,13 @@ async fn copy_limited<R, W>(
     reader: &mut R,
     writer: &mut W,
     bytes_per_second: Option<u64>,
+    buffer_size: usize,
 ) -> Result<u64>
 where
     R: AsyncRead + Unpin + ?Sized,
     W: AsyncWrite + Unpin + ?Sized,
 {
-    let mut buf = vec![0_u8; 16 * 1024];
+    let mut buf = vec![0_u8; buffer_size];
     let mut total = 0_u64;
     loop {
         let n = reader.read(&mut buf).await.context("read relay stream")?;
@@ -4119,6 +4131,34 @@ mod tests {
                 bytes_down_total: AtomicU64::new(0),
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn unbounded_relay_copy_handles_large_bidirectional_payloads() {
+        let (mut left_app, mut left_relay) = duplex(RELAY_COPY_BUFFER_SIZE * 3);
+        let (mut right_relay, mut right_app) = duplex(RELAY_COPY_BUFFER_SIZE * 3);
+        let relay = tokio::spawn(async move {
+            copy_bidirectional_limited(&mut left_relay, &mut right_relay, None).await
+        });
+
+        let left_payload = vec![b'a'; RELAY_COPY_BUFFER_SIZE + 11];
+        let right_payload = vec![b'b'; RELAY_COPY_BUFFER_SIZE + 23];
+        left_app.write_all(&left_payload).await.unwrap();
+        left_app.shutdown().await.unwrap();
+        right_app.write_all(&right_payload).await.unwrap();
+        right_app.shutdown().await.unwrap();
+
+        let mut from_left = vec![0_u8; left_payload.len()];
+        right_app.read_exact(&mut from_left).await.unwrap();
+        assert_eq!(from_left, left_payload);
+
+        let mut from_right = vec![0_u8; right_payload.len()];
+        left_app.read_exact(&mut from_right).await.unwrap();
+        assert_eq!(from_right, right_payload);
+
+        let (up, down) = relay.await.unwrap().unwrap();
+        assert_eq!(up, (RELAY_COPY_BUFFER_SIZE + 11) as u64);
+        assert_eq!(down, (RELAY_COPY_BUFFER_SIZE + 23) as u64);
     }
 
     #[tokio::test]

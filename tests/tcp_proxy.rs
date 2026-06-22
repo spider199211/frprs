@@ -9,6 +9,7 @@ use frprs::{
     server,
 };
 use std::{
+    io::ErrorKind,
     net::{TcpListener as StdTcpListener, UdpSocket as StdUdpSocket},
     sync::OnceLock,
 };
@@ -56,6 +57,25 @@ async fn wait_until_connect_fails(addr: String) {
             Ok(_) if Instant::now() < deadline => sleep(Duration::from_millis(100)).await,
             Ok(_) => panic!("connection to {addr} was still accepted"),
             Err(_) => return,
+        }
+    }
+}
+
+async fn recv_udp_ignoring_connection_reset(
+    socket: &UdpSocket,
+    buf: &mut [u8],
+    timeout: Duration,
+) -> (usize, std::net::SocketAddr) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            panic!("timed out waiting for udp packet");
+        };
+        match tokio::time::timeout(remaining, socket.recv_from(buf)).await {
+            Ok(Ok(received)) => return received,
+            Ok(Err(err)) if err.kind() == ErrorKind::ConnectionReset => continue,
+            Ok(Err(err)) => panic!("udp recv failed: {err}"),
+            Err(_) => panic!("timed out waiting for udp packet"),
         }
     }
 }
@@ -491,10 +511,8 @@ async fn client_local_connect_plugin_allows_udp_session() {
         .await
         .unwrap();
     let mut got = [0_u8; 64];
-    let (n, _) = tokio::time::timeout(Duration::from_secs(5), visitor.recv_from(&mut got))
-        .await
-        .unwrap()
-        .unwrap();
+    let (n, _) =
+        recv_udp_ignoring_connection_reset(&visitor, &mut got, Duration::from_secs(5)).await;
     assert_eq!(&got[..n], b"hello plugin udp");
 
     let plugin_request = plugin_rx.await.unwrap();
@@ -2958,10 +2976,8 @@ async fn udp_proxy_forwards_packets() {
         .unwrap();
 
     let mut buf = [0_u8; 1024];
-    let (n, _) = tokio::time::timeout(Duration::from_secs(5), visitor.recv_from(&mut buf))
-        .await
-        .unwrap()
-        .unwrap();
+    let (n, _) =
+        recv_udp_ignoring_connection_reset(&visitor, &mut buf, Duration::from_secs(5)).await;
     assert_eq!(&buf[..n], b"hello udp");
 
     client_task.abort();
@@ -3719,10 +3735,8 @@ async fn server_udp_batch_reuses_visitor_destination() {
     let mut got = Vec::new();
     let mut buf = [0_u8; 1024];
     for _ in 0..2 {
-        let (n, _) = tokio::time::timeout(Duration::from_secs(5), visitor.recv_from(&mut buf))
-            .await
-            .unwrap()
-            .unwrap();
+        let (n, _) =
+            recv_udp_ignoring_connection_reset(&visitor, &mut buf, Duration::from_secs(5)).await;
         got.push(String::from_utf8_lossy(&buf[..n]).to_string());
     }
     assert_eq!(got, vec!["alpha", "beta"]);
@@ -3823,10 +3837,7 @@ async fn sudp_visitor_forwards_packets_directly_when_peer_reachable() {
         .await
         .unwrap();
     let mut buf = [0_u8; 1024];
-    let (n, _) = tokio::time::timeout(Duration::from_secs(5), user.recv_from(&mut buf))
-        .await
-        .unwrap()
-        .unwrap();
+    let (n, _) = recv_udp_ignoring_connection_reset(&user, &mut buf, Duration::from_secs(5)).await;
     assert_eq!(&buf[..n], b"hello sudp");
     sleep(Duration::from_millis(400)).await;
 
@@ -3937,10 +3948,7 @@ async fn sudp_group_visitor_forwards_packets_directly_when_peer_reachable() {
         .await
         .unwrap();
     let mut buf = [0_u8; 1024];
-    let (n, _) = tokio::time::timeout(Duration::from_secs(5), user.recv_from(&mut buf))
-        .await
-        .unwrap()
-        .unwrap();
+    let (n, _) = recv_udp_ignoring_connection_reset(&user, &mut buf, Duration::from_secs(5)).await;
     assert_eq!(&buf[..n], b"hello sudp group");
     sleep(Duration::from_millis(400)).await;
 
@@ -4052,10 +4060,7 @@ async fn sudp_visitor_waits_for_delayed_owner_nat_notification() {
     let owner_task = tokio::spawn(client::run(owner_cfg));
 
     let mut buf = [0_u8; 1024];
-    let (n, _) = tokio::time::timeout(Duration::from_secs(5), user.recv_from(&mut buf))
-        .await
-        .unwrap()
-        .unwrap();
+    let (n, _) = recv_udp_ignoring_connection_reset(&user, &mut buf, Duration::from_secs(5)).await;
     assert_eq!(&buf[..n], b"hello delayed sudp");
     sleep(Duration::from_millis(400)).await;
 

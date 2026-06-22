@@ -7,7 +7,7 @@ This file tracks the Rust rewrite against the upstream `fatedier/frp` feature su
 | `frps` / `frpc` binaries | Implemented | `cargo run --bin frps`, `cargo run --bin frpc`. |
 | TOML config loading | Implemented | Supports frp-style core fields. More legacy and include-file behavior remains. |
 | Token authentication | Implemented | Shared `[auth].token` checked on login, work connections, and ping. |
-| TCP proxy | Implemented | Control connection, work connection request, remote listener, bidirectional forwarding. |
+| TCP proxy | Implemented | Control connection, work connection request, remote listener, bidirectional forwarding with a tunable 64 KiB relay buffer on unthrottled server-side stream copies. |
 | UDP proxy | Implemented | Request/response forwarding, local NAT session reuse, bidirectional batching, grouped packet batching, nonblocking batch queues, deadline-based batch windows, batch destination caching, batch-path preallocation, server-side batch buffer reuse, throttled datagram plugin-session pruning, and groups are implemented. Deeper packet-path optimizations remain. |
 | HTTP proxy | Implemented | Routes by `Host`, wildcard domains, `locations`, header rewrite, Basic Auth, real IP headers, and groups. |
 | HTTPS proxy | Implemented | Routes by TLS SNI / `customDomains`, wildcard domains, `*` fallback, groups, and raw passthrough. |
@@ -34,7 +34,7 @@ This file tracks the Rust rewrite against the upstream `fatedier/frp` feature su
 
 Current tested flows:
 
-- TCP echo through `frps` and `frpc`.
+- TCP echo through `frps` and `frpc`, including large unthrottled relay-buffer copy coverage.
 - UDP echo through `frps` and `frpc`, including grouped packet batching, batch-path preallocation, and datagram plugin-session prune throttling.
 - HTTP request routed by `Host` through `frps` and `frpc`.
 - HTTPS passthrough request routed by TLS SNI through `frps` and `frpc`.
