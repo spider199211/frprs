@@ -1416,7 +1416,17 @@ async fn connect_xtcp_direct_candidate(
         .await
         .with_context(|| format!("read xtcp direct handshake from {candidate}"))?
     {
-        Message::NewVisitorConnResp { error, .. } if error.is_empty() => Ok(peer),
+        Message::NewVisitorConnResp { proxy_name, error }
+            if error.is_empty() && proxy_name == visitor.server_name =>
+        {
+            Ok(peer)
+        }
+        Message::NewVisitorConnResp { proxy_name, error } if error.is_empty() => {
+            bail!(
+                "xtcp direct peer responded for unexpected proxy {proxy_name}, expected {}",
+                visitor.server_name
+            )
+        }
         Message::NewVisitorConnResp { error, .. } => {
             bail!("xtcp direct peer rejected visitor: {error}")
         }
@@ -4365,6 +4375,46 @@ mod tests {
             .unwrap();
         slow_task.abort();
         fast_task.abort();
+    }
+
+    #[tokio::test]
+    async fn xtcp_direct_candidate_rejects_wrong_response_proxy() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            match read_msg(&mut stream).await.unwrap() {
+                Message::NewVisitorConn { .. } => {
+                    write_msg(
+                        &mut stream,
+                        &Message::NewVisitorConnResp {
+                            proxy_name: "other-xtcp".to_string(),
+                            error: String::new(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+                other => panic!("unexpected direct handshake: {other:?}"),
+            }
+        });
+        let visitor = VisitorConfig {
+            name: "visitor".to_string(),
+            visitor_type: ProxyType::Xtcp,
+            server_name: "xtcp-echo".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+
+        let err = connect_xtcp_direct_candidate(&visitor, &addr)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unexpected proxy other-xtcp"),
+            "unexpected error: {err:#}"
+        );
+        task.await.unwrap();
     }
 
     #[tokio::test]
