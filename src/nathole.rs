@@ -57,7 +57,13 @@ pub struct NatHoleController {
     ttl: Duration,
     cleanup_interval: Duration,
     last_cleanup: Mutex<Instant>,
-    sessions: Mutex<HashMap<String, NatHoleSession>>,
+    sessions: Mutex<HashMap<NatHoleSessionKey, NatHoleSession>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct NatHoleSessionKey {
+    transaction_id: String,
+    proxy_name: String,
 }
 
 #[derive(Debug)]
@@ -110,20 +116,22 @@ impl NatHoleController {
         if should_cleanup {
             Self::cleanup_locked(&mut sessions, self.ttl, now);
         }
-        if !sessions.contains_key(&peer.transaction_id) {
+        let key = NatHoleSessionKey {
+            transaction_id: peer.transaction_id.clone(),
+            proxy_name: peer.proxy_name.clone(),
+        };
+        if !sessions.contains_key(&key) {
             Self::enforce_session_limit_locked(&mut sessions);
         }
 
-        let session = sessions
-            .entry(peer.transaction_id.clone())
-            .or_insert_with(|| NatHoleSession {
-                proxy_name: peer.proxy_name.clone(),
-                servers: Vec::new(),
-                visitors: Vec::new(),
-                next_server: 0,
-                next_visitor: 0,
-                updated_at: Instant::now(),
-            });
+        let session = sessions.entry(key).or_insert_with(|| NatHoleSession {
+            proxy_name: peer.proxy_name.clone(),
+            servers: Vec::new(),
+            visitors: Vec::new(),
+            next_server: 0,
+            next_visitor: 0,
+            updated_at: Instant::now(),
+        });
 
         if session.proxy_name != peer.proxy_name {
             bail!(
@@ -167,24 +175,31 @@ impl NatHoleController {
         if should_cleanup {
             Self::cleanup_locked(&mut sessions, self.ttl, now);
         }
+        let key = sessions
+            .keys()
+            .find(|key| key.transaction_id == transaction_id)
+            .cloned();
         let mut remove_session = false;
-        let candidate = sessions.get_mut(transaction_id).and_then(|session| {
-            let candidate = Self::candidate_from_session(session, role, None, self.ttl, now);
-            remove_session = Self::session_is_empty_and_expired(session, self.ttl, now);
-            candidate
+        let candidate = key.as_ref().and_then(|key| {
+            sessions.get_mut(key).and_then(|session| {
+                let candidate = Self::candidate_from_session(session, role, None, self.ttl, now);
+                remove_session = Self::session_is_empty_and_expired(session, self.ttl, now);
+                candidate
+            })
         });
         if remove_session {
-            sessions.remove(transaction_id);
+            if let Some(key) = key {
+                sessions.remove(&key);
+            }
         }
         candidate
     }
 
     pub fn remove(&self, transaction_id: &str) -> bool {
-        self.sessions
-            .lock()
-            .expect("nathole mutex poisoned")
-            .remove(transaction_id)
-            .is_some()
+        let mut sessions = self.sessions.lock().expect("nathole mutex poisoned");
+        let before = sessions.len();
+        sessions.retain(|key, _| key.transaction_id != transaction_id);
+        sessions.len() != before
     }
 
     pub fn remove_run_id(&self, run_id: &str) -> usize {
@@ -295,14 +310,18 @@ impl NatHoleController {
         true
     }
 
-    fn cleanup_locked(sessions: &mut HashMap<String, NatHoleSession>, ttl: Duration, now: Instant) {
+    fn cleanup_locked(
+        sessions: &mut HashMap<NatHoleSessionKey, NatHoleSession>,
+        ttl: Duration,
+        now: Instant,
+    ) {
         sessions.retain(|_, session| {
             Self::prune_session_locked(session, ttl, now);
             !Self::session_is_empty_and_expired(session, ttl, now)
         });
     }
 
-    fn enforce_session_limit_locked(sessions: &mut HashMap<String, NatHoleSession>) {
+    fn enforce_session_limit_locked(sessions: &mut HashMap<NatHoleSessionKey, NatHoleSession>) {
         if sessions.len() < NAT_HOLE_SESSION_LIMIT {
             return;
         }
@@ -340,6 +359,13 @@ mod tests {
 
     fn addr(port: u16) -> SocketAddr {
         format!("127.0.0.1:{port}").parse().unwrap()
+    }
+
+    fn session_key(transaction_id: &str, proxy_name: &str) -> NatHoleSessionKey {
+        NatHoleSessionKey {
+            transaction_id: transaction_id.to_string(),
+            proxy_name: proxy_name.to_string(),
+        }
     }
 
     #[test]
@@ -531,7 +557,9 @@ mod tests {
 
         {
             let sessions = controller.sessions.lock().unwrap();
-            let session = sessions.get("tx-bounded").unwrap();
+            let session = sessions
+                .get(&session_key("tx-bounded", "xtcp-group"))
+                .unwrap();
             assert_eq!(session.servers.len(), NAT_HOLE_PEER_LIMIT_PER_ROLE);
             assert!(!session
                 .servers
@@ -577,7 +605,9 @@ mod tests {
         }
 
         let sessions = controller.sessions.lock().unwrap();
-        let session = sessions.get("tx-bounded").unwrap();
+        let session = sessions
+            .get(&session_key("tx-bounded", "xtcp-group"))
+            .unwrap();
         assert_eq!(session.visitors.len(), NAT_HOLE_PEER_LIMIT_PER_ROLE);
         assert!(!session
             .visitors
@@ -618,7 +648,9 @@ mod tests {
 
         {
             let sessions = controller.sessions.lock().unwrap();
-            let session = sessions.get("tx-refresh").unwrap();
+            let session = sessions
+                .get(&session_key("tx-refresh", "xtcp-group"))
+                .unwrap();
             assert_eq!(session.servers.len(), NAT_HOLE_PEER_LIMIT_PER_ROLE);
             assert!(session.servers.iter().any(|entry| {
                 entry.peer.run_id == "owner-0" && entry.peer.observed_addr == addr(9000)
@@ -637,7 +669,9 @@ mod tests {
             .unwrap();
 
         let sessions = controller.sessions.lock().unwrap();
-        let session = sessions.get("tx-refresh").unwrap();
+        let session = sessions
+            .get(&session_key("tx-refresh", "xtcp-group"))
+            .unwrap();
         assert_eq!(session.servers.len(), NAT_HOLE_PEER_LIMIT_PER_ROLE);
         assert!(session
             .servers
@@ -672,8 +706,11 @@ mod tests {
 
         let sessions = controller.sessions.lock().unwrap();
         assert_eq!(sessions.len(), NAT_HOLE_SESSION_LIMIT);
-        assert!(!sessions.contains_key("tx-0"));
-        assert!(sessions.contains_key(&format!("tx-{NAT_HOLE_SESSION_LIMIT}")));
+        assert!(!sessions.contains_key(&session_key("tx-0", "xtcp-group")));
+        assert!(sessions.contains_key(&session_key(
+            &format!("tx-{NAT_HOLE_SESSION_LIMIT}"),
+            "xtcp-group"
+        )));
     }
 
     #[test]
@@ -706,11 +743,14 @@ mod tests {
 
         let sessions = controller.sessions.lock().unwrap();
         assert_eq!(sessions.len(), NAT_HOLE_SESSION_LIMIT);
-        assert!(sessions.contains_key("tx-0"));
-        assert!(sessions.contains_key(&format!("tx-{}", NAT_HOLE_SESSION_LIMIT - 1)));
+        assert!(sessions.contains_key(&session_key("tx-0", "xtcp-group")));
+        assert!(sessions.contains_key(&session_key(
+            &format!("tx-{}", NAT_HOLE_SESSION_LIMIT - 1),
+            "xtcp-group"
+        )));
         assert_eq!(
             sessions
-                .get("tx-0")
+                .get(&session_key("tx-0", "xtcp-group"))
                 .and_then(|session| session.servers.first())
                 .map(|entry| entry.peer.observed_addr),
             Some(addr(9000))
@@ -851,7 +891,7 @@ mod tests {
             .sessions
             .lock()
             .unwrap()
-            .contains_key("tx-stale-unrelated"));
+            .contains_key(&session_key("tx-stale-unrelated", "xtcp-prune")));
 
         thread::sleep(Duration::from_millis(50));
         assert_eq!(
@@ -871,7 +911,81 @@ mod tests {
             .sessions
             .lock()
             .unwrap()
-            .contains_key("tx-stale-unrelated"));
+            .contains_key(&session_key("tx-stale-unrelated", "xtcp-prune")));
+    }
+
+    #[test]
+    fn isolates_same_transaction_id_by_proxy_name() {
+        let controller = NatHoleController::default();
+
+        assert_eq!(
+            controller
+                .register(NatHolePeer {
+                    transaction_id: "shared-tx".to_string(),
+                    proxy_name: "xtcp-a".to_string(),
+                    run_id: "owner-a".to_string(),
+                    role: NatHoleRole::Server,
+                    observed_addr: addr(7001),
+                    local_addrs: vec![addr(10001)],
+                })
+                .unwrap(),
+            NatHoleOutcome::Waiting
+        );
+        assert_eq!(
+            controller
+                .register(NatHolePeer {
+                    transaction_id: "shared-tx".to_string(),
+                    proxy_name: "xtcp-b".to_string(),
+                    run_id: "owner-b".to_string(),
+                    role: NatHoleRole::Server,
+                    observed_addr: addr(7002),
+                    local_addrs: vec![addr(10002)],
+                })
+                .unwrap(),
+            NatHoleOutcome::Waiting
+        );
+
+        let matched_a = controller
+            .register(NatHolePeer {
+                transaction_id: "shared-tx".to_string(),
+                proxy_name: "xtcp-a".to_string(),
+                run_id: "visitor-a".to_string(),
+                role: NatHoleRole::Visitor,
+                observed_addr: addr(8001),
+                local_addrs: vec![addr(11001)],
+            })
+            .unwrap();
+        let matched_b = controller
+            .register(NatHolePeer {
+                transaction_id: "shared-tx".to_string(),
+                proxy_name: "xtcp-b".to_string(),
+                run_id: "visitor-b".to_string(),
+                role: NatHoleRole::Visitor,
+                observed_addr: addr(8002),
+                local_addrs: vec![addr(11002)],
+            })
+            .unwrap();
+
+        match matched_a {
+            NatHoleOutcome::Matched(candidate) => {
+                assert_eq!(candidate.proxy_name, "xtcp-a");
+                assert_eq!(candidate.peer_run_id, "owner-a");
+                assert_eq!(candidate.local_addrs, vec![addr(10001)]);
+            }
+            other => panic!("unexpected xtcp-a outcome: {other:?}"),
+        }
+        match matched_b {
+            NatHoleOutcome::Matched(candidate) => {
+                assert_eq!(candidate.proxy_name, "xtcp-b");
+                assert_eq!(candidate.peer_run_id, "owner-b");
+                assert_eq!(candidate.local_addrs, vec![addr(10002)]);
+            }
+            other => panic!("unexpected xtcp-b outcome: {other:?}"),
+        }
+
+        let sessions = controller.sessions.lock().unwrap();
+        assert!(sessions.contains_key(&session_key("shared-tx", "xtcp-a")));
+        assert!(sessions.contains_key(&session_key("shared-tx", "xtcp-b")));
     }
 
     #[test]
