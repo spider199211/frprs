@@ -13,7 +13,7 @@ use std::{
     env, fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -107,6 +107,8 @@ struct XtcpDirectPeer {
 struct SudpDirectOwnerSession {
     local_socket: Arc<UdpSocket>,
     peer: Arc<Mutex<SocketAddr>>,
+    updated_at: StdMutex<Instant>,
+    task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 #[derive(Clone)]
@@ -1684,6 +1686,10 @@ async fn sudp_direct_owner_session(
 ) -> Result<Arc<UdpSocket>> {
     if let Some(session) = sessions.lock().await.get(session_id).cloned() {
         *session.peer.lock().await = peer;
+        *session
+            .updated_at
+            .lock()
+            .expect("sudp direct owner session mutex poisoned") = Instant::now();
         return Ok(session.local_socket.clone());
     }
 
@@ -1697,23 +1703,72 @@ async fn sudp_direct_owner_session(
         if let Some(existing) = sessions_guard.get(session_id) {
             existing.clone()
         } else {
+            enforce_sudp_direct_owner_session_limit_locked(&mut sessions_guard, session_id);
             let session = Arc::new(SudpDirectOwnerSession {
                 local_socket: socket,
                 peer: Arc::new(Mutex::new(peer)),
+                updated_at: StdMutex::new(Instant::now()),
+                task: StdMutex::new(None),
             });
             sessions_guard.insert(session_id.to_string(), session.clone());
-            spawn_sudp_direct_owner_response_loop(
+            let task = spawn_sudp_direct_owner_response_loop(
                 response_proxy_name.to_string(),
                 session_id.to_string(),
                 session.clone(),
                 direct_socket,
                 sessions.clone(),
             );
+            *session
+                .task
+                .lock()
+                .expect("sudp direct owner task mutex poisoned") = Some(task);
             session
         }
     };
     *session.peer.lock().await = peer;
+    *session
+        .updated_at
+        .lock()
+        .expect("sudp direct owner session mutex poisoned") = Instant::now();
     Ok(session.local_socket.clone())
+}
+
+fn enforce_sudp_direct_owner_session_limit_locked(
+    sessions: &mut HashMap<String, Arc<SudpDirectOwnerSession>>,
+    keep_session_id: &str,
+) {
+    while sessions.len() >= SUDP_DIRECT_SESSION_LIMIT {
+        let Some(oldest) = sessions
+            .iter()
+            .filter(|(session_id, _)| session_id.as_str() != keep_session_id)
+            .min_by_key(|(_, session)| {
+                *session
+                    .updated_at
+                    .lock()
+                    .expect("sudp direct owner session mutex poisoned")
+            })
+            .map(|(session_id, _)| session_id.clone())
+        else {
+            break;
+        };
+        remove_sudp_direct_owner_session_locked(sessions, &oldest);
+    }
+}
+
+fn remove_sudp_direct_owner_session_locked(
+    sessions: &mut HashMap<String, Arc<SudpDirectOwnerSession>>,
+    session_id: &str,
+) {
+    if let Some(session) = sessions.remove(session_id) {
+        if let Some(task) = session
+            .task
+            .lock()
+            .expect("sudp direct owner task mutex poisoned")
+            .take()
+        {
+            task.abort();
+        }
+    }
 }
 
 fn spawn_sudp_direct_owner_response_loop(
@@ -1722,7 +1777,7 @@ fn spawn_sudp_direct_owner_response_loop(
     session: Arc<SudpDirectOwnerSession>,
     direct_socket: Arc<UdpSocket>,
     sessions: Arc<Mutex<HashMap<String, Arc<SudpDirectOwnerSession>>>>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut buf = vec![0_u8; 64 * 1024];
         loop {
@@ -1771,7 +1826,7 @@ fn spawn_sudp_direct_owner_response_loop(
         {
             sessions.remove(&session_id);
         }
-    });
+    })
 }
 
 async fn try_sudp_direct_visitor(
@@ -3982,6 +4037,32 @@ mod tests {
 
         let stale = time::timeout(Duration::from_millis(100), peer_a.recv_from(&mut buf)).await;
         assert!(stale.is_err(), "response was sent to stale peer");
+    }
+
+    #[tokio::test]
+    async fn sudp_direct_owner_sessions_are_bounded_and_evict_oldest() {
+        let direct_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let sessions = Arc::new(Mutex::new(
+            HashMap::<String, Arc<SudpDirectOwnerSession>>::new(),
+        ));
+
+        for idx in 0..=SUDP_DIRECT_SESSION_LIMIT {
+            let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            sudp_direct_owner_session(
+                &format!("owner-session-{idx}"),
+                "sudp-echo",
+                direct_socket.clone(),
+                sessions.clone(),
+                peer.local_addr().unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+
+        let sessions = sessions.lock().await;
+        assert_eq!(sessions.len(), SUDP_DIRECT_SESSION_LIMIT);
+        assert!(!sessions.contains_key("owner-session-0"));
+        assert!(sessions.contains_key(&format!("owner-session-{SUDP_DIRECT_SESSION_LIMIT}")));
     }
 
     #[tokio::test]
