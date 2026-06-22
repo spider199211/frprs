@@ -2428,7 +2428,7 @@ fn schedule_sudp_relay_fallback(
 
 fn parse_sudp_direct_response(data: &[u8]) -> Option<(String, String, Option<Vec<u8>>, bool)> {
     let frame = parse_sudp_direct_frame(data)?;
-    if frame.from_visitor {
+    if frame.from_visitor || frame.sk.is_some() {
         return None;
     }
     let content = if frame.ack { None } else { Some(frame.content) };
@@ -4852,6 +4852,144 @@ mod tests {
             .lock()
             .await
             .contains(&session_id));
+        assert!(!state
+            .sudp_direct_visitor_peers
+            .lock()
+            .await
+            .contains_key(&session_id));
+        assert!(state
+            .sudp_direct_pending
+            .lock()
+            .await
+            .contains_key(&session_id));
+    }
+
+    #[tokio::test]
+    async fn sudp_direct_visitor_origin_response_is_ignored() {
+        let (state, _server) = test_state();
+        let session_id = "visitor|127.0.0.1:50000".to_string();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let socket_addr = socket.local_addr().unwrap();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let visitor = VisitorConfig {
+            name: "visitor".to_string(),
+            visitor_type: ProxyType::Sudp,
+            server_name: "sudp-echo".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+        state
+            .sudp_direct_pending
+            .lock()
+            .await
+            .entry(session_id.clone())
+            .or_default()
+            .push_back(sudp_direct_visitor_frame(
+                &visitor,
+                &session_id,
+                b"hello sudp".to_vec(),
+                false,
+            ));
+        spawn_sudp_direct_visitor_response_loop(
+            state.clone(),
+            session_id.clone(),
+            visitor.server_name.clone(),
+            socket,
+        );
+
+        let reflected_ack = DirectSudpFrame {
+            magic: DIRECT_SUDP_MAGIC.to_string(),
+            proxy_name: "sudp-echo".to_string(),
+            session_id: session_id.clone(),
+            content: Vec::new(),
+            sk: Some("secret".to_string()),
+            from_visitor: true,
+            ack: true,
+            probe: false,
+        };
+        peer.send_to(&serde_json::to_vec(&reflected_ack).unwrap(), socket_addr)
+            .await
+            .unwrap();
+
+        assert!(
+            time::timeout(
+                Duration::from_millis(200),
+                peer.recv_from(&mut [0_u8; 1024])
+            )
+            .await
+            .is_err(),
+            "visitor-origin ack flushed pending payload"
+        );
+        assert!(!state
+            .sudp_direct_visitor_peers
+            .lock()
+            .await
+            .contains_key(&session_id));
+        assert!(state
+            .sudp_direct_pending
+            .lock()
+            .await
+            .contains_key(&session_id));
+    }
+
+    #[tokio::test]
+    async fn sudp_direct_response_with_secret_field_is_ignored() {
+        let (state, _server) = test_state();
+        let session_id = "visitor|127.0.0.1:50000".to_string();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let socket_addr = socket.local_addr().unwrap();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let visitor = VisitorConfig {
+            name: "visitor".to_string(),
+            visitor_type: ProxyType::Sudp,
+            server_name: "sudp-echo".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+        state
+            .sudp_direct_pending
+            .lock()
+            .await
+            .entry(session_id.clone())
+            .or_default()
+            .push_back(sudp_direct_visitor_frame(
+                &visitor,
+                &session_id,
+                b"hello sudp".to_vec(),
+                false,
+            ));
+        spawn_sudp_direct_visitor_response_loop(
+            state.clone(),
+            session_id.clone(),
+            visitor.server_name.clone(),
+            socket,
+        );
+
+        let ack_with_secret = DirectSudpFrame {
+            magic: DIRECT_SUDP_MAGIC.to_string(),
+            proxy_name: "sudp-echo".to_string(),
+            session_id: session_id.clone(),
+            content: Vec::new(),
+            sk: Some("secret".to_string()),
+            from_visitor: false,
+            ack: true,
+            probe: false,
+        };
+        peer.send_to(&serde_json::to_vec(&ack_with_secret).unwrap(), socket_addr)
+            .await
+            .unwrap();
+
+        assert!(
+            time::timeout(
+                Duration::from_millis(200),
+                peer.recv_from(&mut [0_u8; 1024])
+            )
+            .await
+            .is_err(),
+            "secret-bearing ack flushed pending payload"
+        );
         assert!(!state
             .sudp_direct_visitor_peers
             .lock()
