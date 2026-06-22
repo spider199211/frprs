@@ -523,6 +523,47 @@ async fn resolve_server_addr(cfg: &ClientConfig) -> Result<std::net::SocketAddr>
         .ok_or_else(|| anyhow!("server address {server_addr} did not resolve"))
 }
 
+async fn direct_local_addrs(state: &ClientState, bound_addr: SocketAddr) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut addrs = Vec::new();
+    push_direct_local_addr(&mut addrs, &mut seen, bound_addr);
+
+    if bound_addr.ip().is_unspecified() {
+        if let Some(ip) = routed_local_ip(&state.cfg).await {
+            push_direct_local_addr(
+                &mut addrs,
+                &mut seen,
+                SocketAddr::new(ip, bound_addr.port()),
+            );
+        }
+    }
+
+    addrs
+}
+
+fn push_direct_local_addr(
+    addrs: &mut Vec<String>,
+    seen: &mut HashSet<SocketAddr>,
+    addr: SocketAddr,
+) {
+    if is_usable_direct_candidate(&addr) && seen.insert(addr) {
+        addrs.push(addr.to_string());
+    }
+}
+
+async fn routed_local_ip(cfg: &ClientConfig) -> Option<IpAddr> {
+    let server_addr = resolve_server_addr(cfg).await.ok()?;
+    let bind_addr = if server_addr.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = UdpSocket::bind(bind_addr).await.ok()?;
+    socket.connect(server_addr).await.ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    (!ip.is_unspecified()).then_some(ip)
+}
+
 async fn close_proxy(state: &ClientState, proxy_name: &str) -> Result<()> {
     state
         .send(&Message::CloseProxy {
@@ -896,20 +937,20 @@ async fn announce_nat_hole_entries(
 
 fn owner_nat_hole_announcements(
     proxy: &ProxyConfig,
-    advertised_addr: String,
+    local_addrs: Vec<String>,
 ) -> Vec<NatHoleAnnouncement> {
     let mut announcements = vec![NatHoleAnnouncement {
         transaction_id: proxy.name.clone(),
         proxy_name: proxy.name.clone(),
         role: "server",
-        local_addrs: vec![advertised_addr.clone()],
+        local_addrs: local_addrs.clone(),
     }];
     if let Some(group_name) = proxy.group.as_deref().filter(|group| !group.is_empty()) {
         announcements.push(NatHoleAnnouncement {
             transaction_id: group_name.to_string(),
             proxy_name: group_name.to_string(),
             role: "server",
-            local_addrs: vec![advertised_addr],
+            local_addrs,
         });
     }
     announcements
@@ -1023,9 +1064,14 @@ async fn start_xtcp_direct_owner_listener(state: ClientState, proxy: ProxyConfig
     let local_addr = listener
         .local_addr()
         .context("read xtcp direct owner addr")?;
-    let advertised_addr = local_addr.to_string();
+    let local_addrs = direct_local_addrs(&state, local_addr).await;
+    let advertised_addr = if local_addrs.is_empty() {
+        local_addr.to_string()
+    } else {
+        local_addrs.join(",")
+    };
 
-    let announcements = owner_nat_hole_announcements(&proxy, advertised_addr.clone());
+    let announcements = owner_nat_hole_announcements(&proxy, local_addrs);
     announce_nat_hole_entries(&state, &announcements).await?;
     let _refresh = spawn_nat_hole_owner_refresh(
         state.clone(),
@@ -1524,16 +1570,19 @@ async fn start_sudp_direct_owner_listener(state: ClientState, proxy: ProxyConfig
             .await
             .with_context(|| format!("listen sudp direct owner {}", proxy.name))?,
     );
-    let advertised_addr = socket
-        .local_addr()
-        .context("read sudp direct owner addr")?
-        .to_string();
+    let local_addr = socket.local_addr().context("read sudp direct owner addr")?;
+    let local_addrs = direct_local_addrs(&state, local_addr).await;
+    let advertised_addr = if local_addrs.is_empty() {
+        local_addr.to_string()
+    } else {
+        local_addrs.join(",")
+    };
     state
         .sudp_direct_owner_sockets
         .lock()
         .await
         .insert(proxy.name.clone(), socket.clone());
-    let announcements = owner_nat_hole_announcements(&proxy, advertised_addr.clone());
+    let announcements = owner_nat_hole_announcements(&proxy, local_addrs);
     announce_nat_hole_entries(&state, &announcements).await?;
     let _refresh = spawn_nat_hole_owner_refresh(
         state.clone(),
@@ -1754,16 +1803,16 @@ async fn try_sudp_direct_visitor(
         }
     }
 
-    let local_addr = direct_socket
-        .local_addr()
-        .map(|addr| addr.to_string())
-        .unwrap_or_default();
+    let local_addrs = match direct_socket.local_addr() {
+        Ok(addr) => direct_local_addrs(state, addr).await,
+        Err(_) => Vec::new(),
+    };
     let resp = match request_nat_hole_with_grace(
         state,
         &visitor.server_name,
         &visitor.server_name,
         "visitor",
-        vec![local_addr],
+        local_addrs,
         Duration::from_millis(500),
     )
     .await
@@ -2901,6 +2950,52 @@ mod tests {
             work_conn_dial_limiter: Arc::new(Semaphore::new(WORK_CONN_DIAL_LIMIT)),
         };
         (state, server)
+    }
+
+    #[tokio::test]
+    async fn direct_local_addrs_replace_unspecified_bind_with_routed_ip() {
+        let (state, _server) = test_state();
+        let addrs = direct_local_addrs(&state, "0.0.0.0:34567".parse().unwrap()).await;
+
+        assert!(!addrs.iter().any(|addr| addr.starts_with("0.0.0.0:")));
+        assert!(
+            addrs.iter().any(|addr| addr == "127.0.0.1:34567"),
+            "expected routed loopback candidate, got {addrs:?}"
+        );
+    }
+
+    #[test]
+    fn owner_nat_hole_announcements_include_all_local_candidates_for_group() {
+        let proxy = ProxyConfig {
+            name: "sudp-a".to_string(),
+            proxy_type: ProxyType::Sudp,
+            local_ip: "127.0.0.1".to_string(),
+            local_port: 9000,
+            remote_port: 0,
+            group: Some("sudp-group".to_string()),
+            group_key: Some("secret".to_string()),
+            custom_domains: Vec::new(),
+            locations: Vec::new(),
+            host_header_rewrite: None,
+            request_headers: Default::default(),
+            http_user: None,
+            http_password: None,
+            bandwidth_limit: None,
+            sk: None,
+            health_check: None,
+        };
+        let local_addrs = vec![
+            "127.0.0.1:10001".to_string(),
+            "192.168.1.10:10001".to_string(),
+        ];
+
+        let announcements = owner_nat_hole_announcements(&proxy, local_addrs.clone());
+
+        assert_eq!(announcements.len(), 2);
+        assert_eq!(announcements[0].transaction_id, "sudp-a");
+        assert_eq!(announcements[0].local_addrs, local_addrs);
+        assert_eq!(announcements[1].transaction_id, "sudp-group");
+        assert_eq!(announcements[1].local_addrs, announcements[0].local_addrs);
     }
 
     async fn spawn_xtcp_direct_test_peer(delay: Duration) -> (String, tokio::task::JoinHandle<()>) {
