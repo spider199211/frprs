@@ -93,6 +93,8 @@ pub enum Message {
         transaction_id: String,
         proxy_name: String,
         role: String,
+        #[serde(default)]
+        sk: Option<String>,
         local_addrs: Vec<String>,
     },
     NatHoleResp {
@@ -171,5 +173,22 @@ mod tests {
         let got = read_msg(&mut server).await.unwrap();
 
         assert!(matches!(got, Message::ReqWorkConn { count: 3 }));
+    }
+
+    /// 验证旧客户端省略 `sk` 时仍可解析为无密钥 NAT 注册。
+    #[test]
+    fn nat_hole_register_without_secret_defaults_to_none() {
+        let encoded = br#"{
+            "kind":"nat_hole_register",
+            "transaction_id":"tx-legacy",
+            "proxy_name":"xtcp-legacy",
+            "role":"visitor",
+            "local_addrs":[]
+        }"#;
+
+        match serde_json::from_slice::<Message>(encoded).unwrap() {
+            Message::NatHoleRegister { sk, .. } => assert_eq!(sk, None),
+            other => panic!("unexpected legacy message: {other:?}"),
+        }
     }
 }

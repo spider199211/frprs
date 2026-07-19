@@ -754,6 +754,7 @@ async fn register_control(
                 transaction_id,
                 proxy_name,
                 role,
+                sk,
                 local_addrs,
             }) => {
                 let resp = handle_nat_hole_register(
@@ -763,6 +764,7 @@ async fn register_control(
                     transaction_id,
                     proxy_name,
                     role,
+                    sk,
                     local_addrs,
                 )
                 .await;
@@ -820,6 +822,7 @@ async fn register_work_conn(state: ServerState, run_id: String, stream: BoxStrea
     Ok(())
 }
 
+/// 校验并注册 NAT peer，仅向相同私有密钥的在线对端交换候选地址。
 async fn handle_nat_hole_register(
     state: ServerState,
     control: Arc<Control>,
@@ -827,6 +830,7 @@ async fn handle_nat_hole_register(
     transaction_id: String,
     proxy_name: String,
     role: String,
+    sk: Option<String>,
     local_addrs: Vec<String>,
 ) -> Message {
     let parsed = parse_nat_hole_role(&role)
@@ -855,7 +859,9 @@ async fn handle_nat_hole_register(
         observed_addr: peer,
         local_addrs: parsed_local_addrs,
     };
-    let registered = state.nathole.register(current_peer.clone());
+    let registered = state
+        .nathole
+        .register_with_secret(current_peer.clone(), sk.clone());
 
     match registered {
         Ok(NatHoleOutcome::Waiting) => Message::NatHoleResp {
@@ -870,7 +876,7 @@ async fn handle_nat_hole_register(
         },
         Ok(NatHoleOutcome::Matched(candidate)) => {
             let Some(candidate) =
-                take_live_nat_hole_candidate(&state, &current_peer, candidate).await
+                take_live_nat_hole_candidate(&state, &current_peer, sk.as_deref(), candidate).await
             else {
                 return Message::NatHoleResp {
                     transaction_id,
@@ -916,6 +922,7 @@ async fn handle_nat_hole_register(
 async fn take_live_nat_hole_candidate(
     state: &ServerState,
     current_peer: &NatHolePeer,
+    sk: Option<&str>,
     mut candidate: NatHoleCandidate,
 ) -> Option<NatHoleCandidate> {
     loop {
@@ -935,10 +942,11 @@ async fn take_live_nat_hole_candidate(
         if state.nathole.remove_run_id(&candidate.peer_run_id) == 0 {
             return None;
         }
-        candidate = state.nathole.candidate_for(
+        candidate = state.nathole.candidate_for_secret(
             &current_peer.transaction_id,
             &current_peer.proxy_name,
             current_peer.role,
+            sk,
         )?;
     }
 }
@@ -4258,6 +4266,7 @@ mod tests {
             "tx-p2p".to_string(),
             "xtcp-ssh".to_string(),
             "server".to_string(),
+            None,
             vec!["10.0.0.10:10001".to_string()],
         )
         .await;
@@ -4273,6 +4282,7 @@ mod tests {
             "tx-p2p".to_string(),
             "xtcp-ssh".to_string(),
             "visitor".to_string(),
+            None,
             vec!["10.0.0.20:10002".to_string()],
         )
         .await;
@@ -4319,6 +4329,82 @@ mod tests {
         }
     }
 
+    /// 验证服务端不会向错误密钥的 NAT 注册暴露候选，修正密钥后才完成匹配。
+    #[tokio::test]
+    async fn nat_hole_match_requires_same_secret() {
+        let (owner_control, mut owner_stream) = test_control_with_run_id("owner-run", 0);
+        let (visitor_control, _visitor_stream) = test_control_with_run_id("visitor-run", 0);
+        let state = test_server_state(vec![owner_control.clone(), visitor_control.clone()]);
+
+        let owner_resp = handle_nat_hole_register(
+            state.clone(),
+            owner_control,
+            "127.0.0.1:7001".parse().unwrap(),
+            "tx-secret".to_string(),
+            "xtcp-private".to_string(),
+            "server".to_string(),
+            Some("correct-secret".to_string()),
+            vec!["10.0.0.10:10001".to_string()],
+        )
+        .await;
+        assert!(matches!(
+            owner_resp,
+            Message::NatHoleResp { waiting: true, .. }
+        ));
+
+        let wrong_resp = handle_nat_hole_register(
+            state.clone(),
+            visitor_control.clone(),
+            "127.0.0.1:7002".parse().unwrap(),
+            "tx-secret".to_string(),
+            "xtcp-private".to_string(),
+            "visitor".to_string(),
+            Some("wrong-secret".to_string()),
+            vec!["10.0.0.20:10002".to_string()],
+        )
+        .await;
+        assert!(matches!(
+            wrong_resp,
+            Message::NatHoleResp { waiting: true, .. }
+        ));
+        assert!(
+            time::timeout(Duration::from_millis(100), read_msg(&mut owner_stream))
+                .await
+                .is_err()
+        );
+
+        let matched_resp = handle_nat_hole_register(
+            state,
+            visitor_control,
+            "127.0.0.1:7002".parse().unwrap(),
+            "tx-secret".to_string(),
+            "xtcp-private".to_string(),
+            "visitor".to_string(),
+            Some("correct-secret".to_string()),
+            vec!["10.0.0.20:10002".to_string()],
+        )
+        .await;
+        assert!(matches!(
+            matched_resp,
+            Message::NatHoleResp {
+                waiting: false,
+                ref error,
+                ..
+            } if error.is_empty()
+        ));
+        assert!(matches!(
+            time::timeout(Duration::from_secs(1), read_msg(&mut owner_stream))
+                .await
+                .unwrap()
+                .unwrap(),
+            Message::NatHoleResp {
+                waiting: false,
+                ref error,
+                ..
+            } if error.is_empty()
+        ));
+    }
+
     /// 验证 NAT 匹配会剪枝已断线候选，并继续选择同代理下的在线 peer。
     #[tokio::test]
     async fn nat_hole_match_skips_disconnected_peer() {
@@ -4334,6 +4420,7 @@ mod tests {
             "tx-live-peer".to_string(),
             "xtcp-ssh".to_string(),
             "server".to_string(),
+            None,
             vec!["10.0.0.10:10001".to_string()],
         )
         .await;
@@ -4349,6 +4436,7 @@ mod tests {
             "tx-live-peer".to_string(),
             "xtcp-ssh".to_string(),
             "server".to_string(),
+            None,
             vec!["10.0.0.11:10002".to_string()],
         )
         .await;
@@ -4364,6 +4452,7 @@ mod tests {
             "tx-live-peer".to_string(),
             "xtcp-ssh".to_string(),
             "visitor".to_string(),
+            None,
             vec!["10.0.0.20:10003".to_string()],
         )
         .await;
@@ -4426,6 +4515,7 @@ mod tests {
             "tx-too-many-addrs".to_string(),
             "xtcp-ssh".to_string(),
             "server".to_string(),
+            None,
             local_addrs,
         )
         .await;

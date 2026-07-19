@@ -116,6 +116,7 @@ struct NatHoleAnnouncement {
     transaction_id: String,
     proxy_name: String,
     role: &'static str,
+    sk: Option<String>,
     local_addrs: Vec<String>,
 }
 
@@ -636,11 +637,25 @@ async fn cache_nat_hole_response(state: &ClientState, key: String, resp: NatHole
     );
 }
 
+/// 测试未配置密钥时的 NAT 注册兼容路径。
+#[cfg(test)]
 async fn request_nat_hole(
     state: &ClientState,
     transaction_id: &str,
     proxy_name: &str,
     role: &str,
+    local_addrs: Vec<String>,
+) -> Result<NatHoleResponse> {
+    request_nat_hole_with_secret(state, transaction_id, proxy_name, role, None, local_addrs).await
+}
+
+/// 发送携带私有代理密钥的 NAT 注册，并复用同一事务的等待与缓存状态。
+async fn request_nat_hole_with_secret(
+    state: &ClientState,
+    transaction_id: &str,
+    proxy_name: &str,
+    role: &str,
+    sk: Option<String>,
     local_addrs: Vec<String>,
 ) -> Result<NatHoleResponse> {
     let key = nat_hole_waiter_key(transaction_id, proxy_name, role);
@@ -669,6 +684,7 @@ async fn request_nat_hole(
                 transaction_id: transaction_id.to_string(),
                 proxy_name: proxy_name.to_string(),
                 role: role.to_string(),
+                sk,
                 local_addrs,
             })
             .await;
@@ -699,6 +715,8 @@ async fn request_nat_hole(
     Ok(resp)
 }
 
+/// 测试未配置密钥时带短暂异步等待的 NAT 注册兼容路径。
+#[cfg(test)]
 async fn request_nat_hole_with_grace(
     state: &ClientState,
     transaction_id: &str,
@@ -707,7 +725,31 @@ async fn request_nat_hole_with_grace(
     local_addrs: Vec<String>,
     grace: Duration,
 ) -> Result<NatHoleResponse> {
-    let resp = request_nat_hole(state, transaction_id, proxy_name, role, local_addrs).await?;
+    request_nat_hole_with_grace_secret(
+        state,
+        transaction_id,
+        proxy_name,
+        role,
+        None,
+        local_addrs,
+        grace,
+    )
+    .await
+}
+
+/// 在短暂等待异步对端通知时，发送携带私有代理密钥的 NAT 注册。
+async fn request_nat_hole_with_grace_secret(
+    state: &ClientState,
+    transaction_id: &str,
+    proxy_name: &str,
+    role: &str,
+    sk: Option<String>,
+    local_addrs: Vec<String>,
+    grace: Duration,
+) -> Result<NatHoleResponse> {
+    let resp =
+        request_nat_hole_with_secret(state, transaction_id, proxy_name, role, sk, local_addrs)
+            .await?;
     if !resp.waiting || grace.is_zero() {
         return Ok(resp);
     }
@@ -896,11 +938,13 @@ fn sudp_direct_owner_proxy(state: &ClientState, name_or_group: &str) -> Option<P
         })
 }
 
+/// 通过控制通道发送 owner NAT 候选及其私有代理密钥。
 async fn announce_nat_hole(
     state: &ClientState,
     transaction_id: &str,
     proxy_name: &str,
     role: &str,
+    sk: Option<String>,
     local_addrs: Vec<String>,
 ) -> Result<()> {
     state
@@ -908,11 +952,13 @@ async fn announce_nat_hole(
             transaction_id: transaction_id.to_string(),
             proxy_name: proxy_name.to_string(),
             role: role.to_string(),
+            sk,
             local_addrs,
         })
         .await
 }
 
+/// 发送单条预构建的 NAT owner 公告。
 async fn announce_nat_hole_entry(
     state: &ClientState,
     announcement: &NatHoleAnnouncement,
@@ -922,6 +968,7 @@ async fn announce_nat_hole_entry(
         &announcement.transaction_id,
         &announcement.proxy_name,
         announcement.role,
+        announcement.sk.clone(),
         announcement.local_addrs.clone(),
     )
     .await
@@ -937,6 +984,7 @@ async fn announce_nat_hole_entries(
     Ok(())
 }
 
+/// 为代理名及可选分组名构建共享同一密钥的 owner NAT 公告。
 fn owner_nat_hole_announcements(
     proxy: &ProxyConfig,
     local_addrs: Vec<String>,
@@ -945,6 +993,7 @@ fn owner_nat_hole_announcements(
         transaction_id: proxy.name.clone(),
         proxy_name: proxy.name.clone(),
         role: "server",
+        sk: proxy.sk.clone(),
         local_addrs: local_addrs.clone(),
     }];
     if let Some(group_name) = proxy.group.as_deref().filter(|group| !group.is_empty()) {
@@ -952,6 +1001,7 @@ fn owner_nat_hole_announcements(
             transaction_id: group_name.to_string(),
             proxy_name: group_name.to_string(),
             role: "server",
+            sk: proxy.sk.clone(),
             local_addrs,
         });
     }
@@ -1209,11 +1259,12 @@ async fn try_xtcp_direct_visitor(
         }
     }
 
-    let resp = match request_nat_hole_with_grace(
+    let resp = match request_nat_hole_with_grace_secret(
         state,
         &visitor.server_name,
         &visitor.server_name,
         "visitor",
+        visitor.sk.clone(),
         Vec::new(),
         Duration::from_millis(500),
     )
@@ -1872,11 +1923,12 @@ async fn try_sudp_direct_visitor(
         Ok(addr) => direct_local_addrs(state, addr).await,
         Err(_) => Vec::new(),
     };
-    let resp = match request_nat_hole_with_grace(
+    let resp = match request_nat_hole_with_grace_secret(
         state,
         &visitor.server_name,
         &visitor.server_name,
         "visitor",
+        visitor.sk.clone(),
         local_addrs,
         Duration::from_millis(500),
     )
@@ -3445,11 +3497,13 @@ mod tests {
                 transaction_id,
                 proxy_name,
                 role,
+                sk,
                 local_addrs,
             } => {
                 assert_eq!(transaction_id, "tx-stale");
                 assert_eq!(proxy_name, "xtcp-ssh");
                 assert_eq!(role, "visitor");
+                assert_eq!(sk, None);
                 assert_eq!(local_addrs, vec!["10.0.0.20:10002"]);
             }
             other => panic!("unexpected nat hole register: {other:?}"),
@@ -3811,12 +3865,14 @@ mod tests {
                 transaction_id: "xtcp-echo".to_string(),
                 proxy_name: "xtcp-echo".to_string(),
                 role: "server",
+                sk: Some("secret".to_string()),
                 local_addrs: vec!["127.0.0.1:10001".to_string()],
             },
             NatHoleAnnouncement {
                 transaction_id: "xtcp-group".to_string(),
                 proxy_name: "xtcp-group".to_string(),
                 role: "server",
+                sk: Some("secret".to_string()),
                 local_addrs: vec!["127.0.0.1:10001".to_string()],
             },
         ];
@@ -3838,11 +3894,13 @@ mod tests {
                     transaction_id,
                     proxy_name,
                     role,
+                    sk,
                     local_addrs,
                 } => {
                     assert_eq!(transaction_id, expected);
                     assert_eq!(proxy_name, expected);
                     assert_eq!(role, "server");
+                    assert_eq!(sk.as_deref(), Some("secret"));
                     assert_eq!(local_addrs, vec!["127.0.0.1:10001"]);
                 }
                 other => panic!("unexpected nat hole refresh: {other:?}"),
@@ -4600,11 +4658,13 @@ mod tests {
                 transaction_id,
                 proxy_name,
                 role,
+                sk,
                 ..
             } => {
                 assert_eq!(transaction_id, "expired-bad-xtcp");
                 assert_eq!(proxy_name, "expired-bad-xtcp");
                 assert_eq!(role, "visitor");
+                assert_eq!(sk.as_deref(), Some("secret"));
             }
             other => panic!("unexpected nat hole register: {other:?}"),
         }
@@ -5260,11 +5320,13 @@ mod tests {
                 transaction_id,
                 proxy_name,
                 role,
+                sk,
                 local_addrs,
             } => {
                 assert_eq!(transaction_id, "sudp-echo");
                 assert_eq!(proxy_name, "sudp-echo");
                 assert_eq!(role, "visitor");
+                assert_eq!(sk.as_deref(), Some("secret"));
                 assert_eq!(local_addrs.len(), 1);
             }
             other => panic!("unexpected nat hole register: {other:?}"),
@@ -5526,11 +5588,13 @@ mod tests {
                 transaction_id,
                 proxy_name,
                 role,
+                sk,
                 local_addrs,
             } => {
                 assert_eq!(transaction_id, "sudp-echo");
                 assert_eq!(proxy_name, "sudp-echo");
                 assert_eq!(role, "visitor");
+                assert_eq!(sk.as_deref(), Some("secret"));
                 assert_eq!(local_addrs.len(), 1);
             }
             other => panic!("unexpected nat hole register: {other:?}"),

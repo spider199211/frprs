@@ -79,6 +79,7 @@ struct NatHoleSession {
 #[derive(Debug)]
 struct NatHolePeerEntry {
     peer: NatHolePeer,
+    sk: Option<String>,
     updated_at: Instant,
 }
 
@@ -102,7 +103,17 @@ impl NatHoleController {
         }
     }
 
+    /// 注册未配置密钥的 NAT peer。
     pub fn register(&self, peer: NatHolePeer) -> Result<NatHoleOutcome> {
+        self.register_with_secret(peer, None)
+    }
+
+    /// 注册携带私有代理密钥的 NAT peer，后续仅与相同密钥的对端匹配。
+    pub fn register_with_secret(
+        &self,
+        peer: NatHolePeer,
+        sk: Option<String>,
+    ) -> Result<NatHoleOutcome> {
         if peer.transaction_id.trim().is_empty() {
             bail!("nat hole transaction_id is empty");
         }
@@ -146,30 +157,48 @@ impl NatHoleController {
                 &mut session.servers,
                 &mut session.next_server,
                 peer.clone(),
+                sk.clone(),
                 now,
             ),
             NatHoleRole::Visitor => Self::upsert_peer(
                 &mut session.visitors,
                 &mut session.next_visitor,
                 peer.clone(),
+                sk.clone(),
                 now,
             ),
         }
         session.updated_at = now;
 
-        Ok(
-            Self::candidate_from_session(session, peer.role, Some(&peer.run_id), self.ttl, now)
-                .map(NatHoleOutcome::Matched)
-                .unwrap_or(NatHoleOutcome::Waiting),
+        Ok(Self::candidate_from_session(
+            session,
+            peer.role,
+            Some(&peer.run_id),
+            sk.as_deref(),
+            self.ttl,
+            now,
         )
+        .map(NatHoleOutcome::Matched)
+        .unwrap_or(NatHoleOutcome::Waiting))
     }
 
-    /// 按事务与代理双键查询指定角色可用的对端候选，避免同名事务跨代理串线。
+    /// 按事务与代理查询未配置密钥的指定角色对端候选。
     pub fn candidate_for(
         &self,
         transaction_id: &str,
         proxy_name: &str,
         role: NatHoleRole,
+    ) -> Option<NatHoleCandidate> {
+        self.candidate_for_secret(transaction_id, proxy_name, role, None)
+    }
+
+    /// 按事务、代理和密钥查询指定角色可用的对端候选，避免跨代理或跨密钥串线。
+    pub fn candidate_for_secret(
+        &self,
+        transaction_id: &str,
+        proxy_name: &str,
+        role: NatHoleRole,
+        sk: Option<&str>,
     ) -> Option<NatHoleCandidate> {
         let now = Instant::now();
         let should_cleanup = self.should_cleanup(now);
@@ -183,7 +212,7 @@ impl NatHoleController {
         };
         let mut remove_session = false;
         let candidate = sessions.get_mut(&key).and_then(|session| {
-            let candidate = Self::candidate_from_session(session, role, None, self.ttl, now);
+            let candidate = Self::candidate_from_session(session, role, None, sk, self.ttl, now);
             remove_session = Self::session_is_empty_and_expired(session, self.ttl, now);
             candidate
         });
@@ -223,6 +252,7 @@ impl NatHoleController {
         peers: &mut Vec<NatHolePeerEntry>,
         next: &mut usize,
         peer: NatHolePeer,
+        sk: Option<String>,
         now: Instant,
     ) {
         if let Some(existing) = peers
@@ -230,6 +260,7 @@ impl NatHoleController {
             .find(|existing| existing.peer.run_id == peer.run_id)
         {
             existing.peer = peer;
+            existing.sk = sk;
             existing.updated_at = now;
         } else {
             if peers.len() >= NAT_HOLE_PEER_LIMIT_PER_ROLE {
@@ -247,6 +278,7 @@ impl NatHoleController {
             }
             peers.push(NatHolePeerEntry {
                 peer,
+                sk,
                 updated_at: now,
             });
         }
@@ -263,6 +295,7 @@ impl NatHoleController {
         session: &mut NatHoleSession,
         role: NatHoleRole,
         current_run_id: Option<&str>,
+        sk: Option<&str>,
         ttl: Duration,
         now: Instant,
     ) -> Option<NatHoleCandidate> {
@@ -279,10 +312,13 @@ impl NatHoleController {
         for _ in 0..peers.len() {
             let index = *next % peers.len();
             *next = (*next).wrapping_add(1);
-            let peer = &peers[index].peer;
+            let entry = &peers[index];
+            let peer = &entry.peer;
             if current_run_id
                 .map(|run_id| run_id != peer.run_id)
                 .unwrap_or(true)
+                // 密钥必须完全一致，避免恶意或误配控制端获得其他私有代理的候选地址。
+                && entry.sk.as_deref() == sk
             {
                 selected = Some(peer);
                 break;
@@ -414,6 +450,82 @@ mod tests {
             .expect("owner should see visitor candidate");
         assert_eq!(owner_candidate.peer_run_id, "visitor");
         assert_eq!(owner_candidate.observed_addr, addr(7002));
+    }
+
+    /// 验证同一事务与代理中的 peer 只有在私有密钥完全一致时才会互相暴露候选地址。
+    #[test]
+    fn matches_only_peers_with_same_secret() {
+        let controller = NatHoleController::default();
+
+        let owner = NatHolePeer {
+            transaction_id: "tx-secret".to_string(),
+            proxy_name: "xtcp-private".to_string(),
+            run_id: "owner".to_string(),
+            role: NatHoleRole::Server,
+            observed_addr: addr(7001),
+            local_addrs: vec![addr(10001)],
+        };
+        assert_eq!(
+            controller
+                .register_with_secret(owner, Some("correct-secret".to_string()))
+                .unwrap(),
+            NatHoleOutcome::Waiting
+        );
+
+        let wrong_visitor = NatHolePeer {
+            transaction_id: "tx-secret".to_string(),
+            proxy_name: "xtcp-private".to_string(),
+            run_id: "visitor-wrong".to_string(),
+            role: NatHoleRole::Visitor,
+            observed_addr: addr(7002),
+            local_addrs: vec![addr(10002)],
+        };
+        assert_eq!(
+            controller
+                .register_with_secret(wrong_visitor, Some("wrong-secret".to_string()))
+                .unwrap(),
+            NatHoleOutcome::Waiting
+        );
+        assert!(controller
+            .candidate_for_secret(
+                "tx-secret",
+                "xtcp-private",
+                NatHoleRole::Visitor,
+                Some("wrong-secret"),
+            )
+            .is_none());
+
+        let correct_visitor = NatHolePeer {
+            transaction_id: "tx-secret".to_string(),
+            proxy_name: "xtcp-private".to_string(),
+            run_id: "visitor-correct".to_string(),
+            role: NatHoleRole::Visitor,
+            observed_addr: addr(7003),
+            local_addrs: vec![addr(10003)],
+        };
+        assert_eq!(
+            controller
+                .register_with_secret(correct_visitor, Some("correct-secret".to_string()))
+                .unwrap(),
+            NatHoleOutcome::Matched(NatHoleCandidate {
+                transaction_id: "tx-secret".to_string(),
+                proxy_name: "xtcp-private".to_string(),
+                peer_run_id: "owner".to_string(),
+                peer_role: NatHoleRole::Server,
+                observed_addr: addr(7001),
+                local_addrs: vec![addr(10001)],
+            })
+        );
+
+        let owner_candidate = controller
+            .candidate_for_secret(
+                "tx-secret",
+                "xtcp-private",
+                NatHoleRole::Server,
+                Some("correct-secret"),
+            )
+            .expect("owner should only see the visitor with the same secret");
+        assert_eq!(owner_candidate.peer_run_id, "visitor-correct");
     }
 
     #[test]
