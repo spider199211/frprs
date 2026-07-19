@@ -76,12 +76,16 @@ pub struct ClientPluginConfig {
 pub struct TransportConfig {
     #[serde(default = "default_transport_protocol")]
     pub protocol: TransportProtocol,
+    /// 可选的 RFC 5389 STUN 服务地址，用于发现 SUDP owner 的公网映射。
+    #[serde(rename = "natHoleStunServer", default)]
+    pub nat_hole_stun_server: Option<String>,
 }
 
 impl Default for TransportConfig {
     fn default() -> Self {
         Self {
             protocol: TransportProtocol::Tcp,
+            nat_hole_stun_server: None,
         }
     }
 }
@@ -290,12 +294,17 @@ fn default_health_max_failed() -> u32 {
 mod tests {
     use super::*;
 
+    /// 验证 frp 风格客户端配置及可选的 NAT 打洞 STUN 服务地址能够正确解析。
     #[test]
     fn parses_frp_style_client_config() {
         let cfg: ClientConfig = toml::from_str(
             r#"
             serverAddr = "127.0.0.1"
             serverPort = 7000
+
+            [transport]
+            protocol = "tcp"
+            natHoleStunServer = "stun.example.com:3478"
 
             [plugins]
             localConnectURL = "http://127.0.0.1:9001/local_connect"
@@ -333,6 +342,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(cfg.server_addr(), "127.0.0.1:7000");
+        assert_eq!(
+            cfg.transport.nat_hole_stun_server.as_deref(),
+            Some("stun.example.com:3478")
+        );
         assert_eq!(
             cfg.plugins.local_connect_url.as_deref(),
             Some("http://127.0.0.1:9001/local_connect")

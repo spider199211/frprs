@@ -95,6 +95,7 @@ protocol = "tcp"
 # protocol = "websocket"
 # protocol = "kcp"
 # protocol = "quic"
+# natHoleStunServer = "stun.example.com:3478"
 
 [plugins]
 localConnectURL = "http://127.0.0.1:9001/local_connect"
@@ -276,6 +277,7 @@ cargo run --bin frpc -- -c conf/frpc.toml
 - TLS/WebSocket/TCP stream mux/QUIC/KCP：已实现真实控制/工作连接传输，并有端到端代理测试覆盖；TCP stream mux/QUIC 已复用同一连接承载 control/work 双向 stream。
 - STCP/XTCP：已实现 TCP 流的私有 visitor 转发和分组负载均衡；XTCP 已支持可达 peer 的直连数据面，并保留服务端中继 fallback。
 - SUDP/XTCP/P2P：已实现 XTCP/SUDP 直连优先数据面、SUDP 私有服务分组负载均衡、XTCP/SUDP 按分组名直连注册与探测、XTCP/SUDP owner 候选周期刷新、NAT 控制器服务端会话及候选查询/删除按事务/代理名隔离、事务表容量上限、同一事务多 peer 候选有界保留、按 peer 过期清理与轮询、候选局部过期过滤、全局清理节流、local candidate 数量限制、通配绑定地址的路由本地 IP 候选推导、XTCP/SUDP waiting 后短暂等待异步匹配与短 TTL 去重、同 key 并发 NAT 注册合并与有界 waiter fan-out、按事务/代理名/角色隔离的异步通知缓存、XTCP owner 本地服务确认后接受直连、XTCP direct 握手响应代理名校验、SUDP probe 选路与短时重试、SUDP direct 有界 visitor/owner 会话状态和 pending 队列、SUDP direct 响应代理名/方向/`sk` 字段校验、SUDP fallback 后 pending 清理、SUDP owner 主动 punch 短时重试、SUDP owner 响应 peer 刷新、XTCP 成功直连 peer 短 TTL 且有容量上限复用、SUDP 带 TTL 且有容量上限的响应确认直连 peer/未确认回退/失败短 TTL 且有容量上限跳过与 probe 重试降噪、服务端中继 fallback、NAT 双端匹配通知、客户端带 TTL 且有容量上限的异步通知缓存、不可用直连候选过滤、按地址可达性优先且有数量上限的候选优选、XTCP 候选竞速/慢候选取消和失败候选短 TTL 且有容量上限跳过；更完整的复杂 NAT 场景仍待验证和完善。
+- SUDP STUN：客户端配置 `[transport].natHoleStunServer` 后，owner 会用实际直连 UDP socket 发起 RFC 5389 Binding 探测，将校验事务 ID 后得到的 `XOR-MAPPED-ADDRESS` 置于本地候选之前；未配置时不会产生额外网络请求。
 - P2P 安全：XTCP/SUDP NAT 注册已携带 `sk`，服务端只在私有密钥完全一致时交换候选；旧报文缺少该字段时按无密钥注册兼容解析。
 - Transport/热路径：已补 TLS、WebSocket、TCP stream mux、QUIC client session 复用、基础 TCP mux、work connection 补池合并、等待者按需请求、客户端 work connection 建连限流、服务端 TCP-family relay 64KB 可调缓冲拷贝、UDP 非阻塞批处理队列、截止时间批窗口、UDP 批处理缓存/批路径预分配、服务端批处理缓冲复用和 datagram 插件会话清理节流；后续继续补更多连接池调优。
 - 运行时控制：已补轻量 Admin API、更多状态 API、指标接口、指标重置、按代理/分组/客户端关闭能力和 `allowPorts` 运行时更新；后续补更完整的运行时配置管理。
@@ -372,6 +374,7 @@ protocol = "tcp"
 # protocol = "websocket"
 # protocol = "kcp"
 # protocol = "quic"
+# natHoleStunServer = "stun.example.com:3478"
 
 [plugins]
 localConnectURL = "http://127.0.0.1:9001/local_connect"
@@ -507,6 +510,7 @@ Parity roadmap:
 - TLS/WebSocket/TCP stream mux/QUIC/KCP: real control/work transports implemented and covered by end-to-end proxy tests; TCP stream mux and QUIC reuse one client connection for control/work bidirectional streams.
 - STCP/XTCP: private visitor flow and group load balancing implemented for TCP streams; XTCP now has a direct data path for reachable peers plus server-relay fallback.
 - SUDP/XTCP/P2P: XTCP/SUDP direct-first data paths, SUDP private-service group load balancing, XTCP/SUDP direct registration and probing by group name, periodic XTCP/SUDP owner candidate refresh, server-side NAT sessions plus candidate lookup/removal scoped by transaction/proxy, bounded NAT session table, bounded multiple peers per NAT transaction with per-peer expiry, candidate round-robin, local stale-candidate filtering, throttled global cleanup, local-candidate count limiting, route-derived local candidates for wildcard binds, same-key concurrent register coalescing plus bounded waiter fan-out, transaction/proxy/role-scoped async notifications, short XTCP/SUDP wait for async matches after `waiting`, short TTL deduplication for repeated waiting lookups, XTCP owner-side local-service validation before direct acceptance, XTCP direct handshake response proxy-name validation, SUDP probe-based path selection with short retries, bounded SUDP direct visitor/owner session state and pending queue, direct-response proxy-name/direction/`sk`-field validation, pending cleanup after fallback, SUDP owner-side active punching with short retries, SUDP owner response peer refresh, TTL-capped and bounded successful XTCP direct peer reuse, SUDP TTL-capped and bounded response-confirmed direct peer caching/unconfirmed fallback/failed direct skip with probe retry suppression, server-relay fallback, two-sided NAT match notification, client-side TTL-capped and bounded async notification caching, unusable direct-candidate filtering, reachability-first and bounded candidate preference, XTCP candidate racing with slower-candidate cancellation, and short TTL and bounded skip for failed XTCP candidates are implemented; fuller complex NAT scenarios still need broader validation and tuning.
+- SUDP STUN: when `[transport].natHoleStunServer` is configured, the owner sends an RFC 5389 Binding request from its actual direct UDP socket and prioritizes the transaction-validated `XOR-MAPPED-ADDRESS` over local candidates; no extra network request is made when it is unset.
 - P2P security: XTCP/SUDP NAT registrations now carry `sk`, and the server exchanges candidates only between peers with exactly matching private secrets; legacy messages without the field still parse as secretless registrations.
 - Transport/hot paths: TLS, WebSocket, TCP stream mux, QUIC client-session reuse, basic TCP mux, work-connection replenish coalescing, waiter demand-aware requests, bounded client-side work-connection dialing, server-side TCP-family relay copying with a tunable 64 KiB buffer, nonblocking UDP batch queues, deadline-based batch windows, UDP group batching, UDP batch-path caching/preallocation, server-side batch buffer reuse, and throttled datagram plugin-session pruning implemented; add more connection-pool tuning.
 - Runtime controls: lightweight Admin API, richer status APIs, metrics endpoint/reset, proxy/group/client close operations, and runtime `allowPorts` updates implemented; full runtime config management remains.

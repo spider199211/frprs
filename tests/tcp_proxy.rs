@@ -175,7 +175,10 @@ async fn assert_tcp_proxy_forwards_with_transport(protocol: TransportProtocol) {
 
     let bind_port = unused_port();
     let remote_port = unused_port();
-    let transport = TransportConfig { protocol };
+    let transport = TransportConfig {
+        protocol,
+        nat_hole_stun_server: None,
+    };
     let server_cfg = ServerConfig {
         bind_addr: "127.0.0.1".to_string(),
         bind_port,

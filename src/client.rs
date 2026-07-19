@@ -3,6 +3,7 @@ use crate::{
         ClientConfig, HealthCheckType, ProxyConfig, ProxyType, TransportProtocol, VisitorConfig,
     },
     protocol::{read_msg, write_msg, Message, UdpPacketFrame},
+    stun,
     transports::{self, BoxStream},
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -25,6 +26,7 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 
 const DIRECT_SUDP_MAGIC: &str = "frprs-sudp-direct-v1";
+const NAT_HOLE_STUN_TIMEOUT: Duration = Duration::from_millis(500);
 const NAT_HOLE_CACHED_RESPONSE_TTL: Duration = Duration::from_secs(30);
 const NAT_HOLE_CACHED_RESPONSE_LIMIT: usize = 256;
 const NAT_HOLE_WAITER_LIMIT: usize = 64;
@@ -542,6 +544,73 @@ async fn direct_local_addrs(state: &ClientState, bound_addr: SocketAddr) -> Vec<
     }
 
     addrs
+}
+
+/// 合并 SUDP owner 的本地候选与由同一 UDP socket 探测到的公网映射候选。
+async fn sudp_owner_candidate_addrs(
+    state: &ClientState,
+    socket: &UdpSocket,
+    bound_addr: SocketAddr,
+) -> Vec<String> {
+    let mut addrs = direct_local_addrs(state, bound_addr).await;
+    let Some(mapped_addr) = discover_sudp_mapped_addr(state, socket).await else {
+        return addrs;
+    };
+    if !is_usable_direct_candidate(&mapped_addr)
+        || addrs
+            .iter()
+            .any(|addr| addr.parse::<SocketAddr>().ok() == Some(mapped_addr))
+    {
+        return addrs;
+    }
+
+    // 公网映射优先公告，使候选排序在错误的控制连接来源端口之前尝试真实 SUDP 映射。
+    addrs.insert(0, mapped_addr.to_string());
+    addrs
+}
+
+/// 通过显式配置的 STUN Binding 服务发现当前 SUDP socket 的公网映射地址。
+async fn discover_sudp_mapped_addr(state: &ClientState, socket: &UdpSocket) -> Option<SocketAddr> {
+    let stun_server = state
+        .cfg
+        .transport
+        .nat_hole_stun_server
+        .as_deref()
+        .filter(|server| !server.trim().is_empty())?;
+    let local_addr = socket.local_addr().ok()?;
+    let server_addr = tokio::net::lookup_host(stun_server)
+        .await
+        .ok()?
+        .find(|addr| addr.is_ipv4() == local_addr.is_ipv4())?;
+    let (request, transaction_id) = stun::new_binding_request();
+    if let Err(err) = socket.send_to(&request, server_addr).await {
+        debug!("send SUDP STUN request to {server_addr} failed: {err:#}");
+        return None;
+    }
+
+    let deadline = Instant::now() + NAT_HOLE_STUN_TIMEOUT;
+    let mut buf = [0_u8; 512];
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        let received = time::timeout(remaining, socket.recv_from(&mut buf)).await;
+        let (len, peer) = match received {
+            Ok(Ok(received)) => received,
+            Ok(Err(err)) => {
+                debug!("receive SUDP STUN response failed: {err:#}");
+                return None;
+            }
+            Err(_) => {
+                debug!("SUDP STUN request to {server_addr} timed out");
+                return None;
+            }
+        };
+        if peer != server_addr {
+            continue;
+        }
+        if let Some(mapped_addr) = stun::parse_binding_response(&buf[..len], &transaction_id) {
+            return Some(mapped_addr);
+        }
+    }
 }
 
 fn push_direct_local_addr(
@@ -1634,7 +1703,7 @@ async fn start_sudp_direct_owner_listener(state: ClientState, proxy: ProxyConfig
             .with_context(|| format!("listen sudp direct owner {}", proxy.name))?,
     );
     let local_addr = socket.local_addr().context("read sudp direct owner addr")?;
-    let local_addrs = direct_local_addrs(&state, local_addr).await;
+    let local_addrs = sudp_owner_candidate_addrs(&state, &socket, local_addr).await;
     let advertised_addr = if local_addrs.is_empty() {
         local_addr.to_string()
     } else {
@@ -3079,6 +3148,36 @@ mod tests {
             addrs.iter().any(|addr| addr == "127.0.0.1:34567"),
             "expected routed loopback candidate, got {addrs:?}"
         );
+    }
+
+    /// 验证 SUDP owner 会通过直连 socket 获取 STUN 映射，并将其置于本地候选之前。
+    #[tokio::test]
+    async fn sudp_owner_candidates_prefer_stun_mapped_addr() {
+        let stun_server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let stun_addr = stun_server.local_addr().unwrap();
+        let mapped_addr: SocketAddr = "198.51.100.8:45678".parse().unwrap();
+        let server_task = tokio::spawn(async move {
+            let mut buf = [0_u8; 512];
+            let (len, peer) = stun_server.recv_from(&mut buf).await.unwrap();
+            let response = stun::binding_response(&buf[..len], mapped_addr).unwrap();
+            stun_server.send_to(&response, peer).await.unwrap();
+        });
+
+        let (mut state, _server) = test_state();
+        let mut cfg = (*state.cfg).clone();
+        cfg.transport.nat_hole_stun_server = Some(stun_addr.to_string());
+        state.cfg = Arc::new(cfg);
+        let owner_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let owner_local_addr = owner_socket.local_addr().unwrap();
+
+        let candidates = sudp_owner_candidate_addrs(&state, &owner_socket, owner_local_addr).await;
+
+        assert_eq!(
+            candidates.first().map(String::as_str),
+            Some("198.51.100.8:45678")
+        );
+        assert!(candidates.contains(&owner_local_addr.to_string()));
+        server_task.await.unwrap();
     }
 
     #[test]
