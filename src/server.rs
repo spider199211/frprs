@@ -869,6 +869,20 @@ async fn handle_nat_hole_register(
             error: String::new(),
         },
         Ok(NatHoleOutcome::Matched(candidate)) => {
+            let Some(candidate) =
+                take_live_nat_hole_candidate(&state, &current_peer, candidate).await
+            else {
+                return Message::NatHoleResp {
+                    transaction_id,
+                    proxy_name,
+                    role,
+                    observed_addr: peer.to_string(),
+                    peer_observed_addr: String::new(),
+                    peer_local_addrs: Vec::new(),
+                    waiting: true,
+                    error: String::new(),
+                };
+            };
             notify_nat_hole_peer(state, current_peer.clone(), &candidate).await;
             Message::NatHoleResp {
                 transaction_id,
@@ -895,6 +909,37 @@ async fn handle_nat_hole_register(
             waiting: false,
             error: err.to_string(),
         },
+    }
+}
+
+/// 过滤已断开控制连接的 NAT 候选，并在同一事务/代理会话中继续选择在线 peer。
+async fn take_live_nat_hole_candidate(
+    state: &ServerState,
+    current_peer: &NatHolePeer,
+    mut candidate: NatHoleCandidate,
+) -> Option<NatHoleCandidate> {
+    loop {
+        let connected = state
+            .controls
+            .lock()
+            .await
+            .contains_key(&candidate.peer_run_id);
+        if connected {
+            return Some(candidate);
+        }
+
+        debug!(
+            "prune disconnected nat hole peer {} for transaction {}/{}",
+            candidate.peer_run_id, current_peer.transaction_id, current_peer.proxy_name
+        );
+        if state.nathole.remove_run_id(&candidate.peer_run_id) == 0 {
+            return None;
+        }
+        candidate = state.nathole.candidate_for(
+            &current_peer.transaction_id,
+            &current_peer.proxy_name,
+            current_peer.role,
+        )?;
     }
 }
 
@@ -4272,6 +4317,98 @@ mod tests {
             }
             other => panic!("unexpected owner notification: {other:?}"),
         }
+    }
+
+    /// 验证 NAT 匹配会剪枝已断线候选，并继续选择同代理下的在线 peer。
+    #[tokio::test]
+    async fn nat_hole_match_skips_disconnected_peer() {
+        let (stale_owner, _stale_stream) = test_control_with_run_id("owner-stale", 0);
+        let (live_owner, mut live_stream) = test_control_with_run_id("owner-live", 0);
+        let (visitor_control, _visitor_stream) = test_control_with_run_id("visitor-run", 0);
+        let state = test_server_state(vec![live_owner.clone(), visitor_control.clone()]);
+
+        let stale_resp = handle_nat_hole_register(
+            state.clone(),
+            stale_owner,
+            "127.0.0.1:7001".parse().unwrap(),
+            "tx-live-peer".to_string(),
+            "xtcp-ssh".to_string(),
+            "server".to_string(),
+            vec!["10.0.0.10:10001".to_string()],
+        )
+        .await;
+        assert!(matches!(
+            stale_resp,
+            Message::NatHoleResp { waiting: true, .. }
+        ));
+
+        let live_resp = handle_nat_hole_register(
+            state.clone(),
+            live_owner,
+            "127.0.0.1:7002".parse().unwrap(),
+            "tx-live-peer".to_string(),
+            "xtcp-ssh".to_string(),
+            "server".to_string(),
+            vec!["10.0.0.11:10002".to_string()],
+        )
+        .await;
+        assert!(matches!(
+            live_resp,
+            Message::NatHoleResp { waiting: true, .. }
+        ));
+
+        let visitor_resp = handle_nat_hole_register(
+            state.clone(),
+            visitor_control,
+            "127.0.0.1:7003".parse().unwrap(),
+            "tx-live-peer".to_string(),
+            "xtcp-ssh".to_string(),
+            "visitor".to_string(),
+            vec!["10.0.0.20:10003".to_string()],
+        )
+        .await;
+        match visitor_resp {
+            Message::NatHoleResp {
+                peer_observed_addr,
+                peer_local_addrs,
+                waiting,
+                error,
+                ..
+            } => {
+                assert_eq!(peer_observed_addr, "127.0.0.1:7002");
+                assert_eq!(peer_local_addrs, vec!["10.0.0.11:10002"]);
+                assert!(!waiting);
+                assert!(error.is_empty());
+            }
+            other => panic!("unexpected visitor response: {other:?}"),
+        }
+
+        match time::timeout(Duration::from_secs(1), read_msg(&mut live_stream))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Message::NatHoleResp {
+                peer_observed_addr,
+                waiting,
+                error,
+                ..
+            } => {
+                assert_eq!(peer_observed_addr, "127.0.0.1:7003");
+                assert!(!waiting);
+                assert!(error.is_empty());
+            }
+            other => panic!("unexpected live owner notification: {other:?}"),
+        }
+
+        assert_eq!(
+            state
+                .nathole
+                .candidate_for("tx-live-peer", "xtcp-ssh", NatHoleRole::Visitor)
+                .expect("live owner should remain registered")
+                .peer_run_id,
+            "owner-live"
+        );
     }
 
     #[tokio::test]
