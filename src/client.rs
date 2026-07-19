@@ -20,13 +20,14 @@ use std::{
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt, WriteHalf},
     net::{TcpListener, TcpStream, UdpSocket},
-    sync::{mpsc, oneshot, Mutex, OwnedSemaphorePermit, Semaphore},
+    sync::{mpsc, oneshot, Mutex, OnceCell, OwnedSemaphorePermit, Semaphore},
     time,
 };
 use tracing::{debug, error, info, warn};
 
 const DIRECT_SUDP_MAGIC: &str = "frprs-sudp-direct-v1";
 const NAT_HOLE_STUN_TIMEOUT: Duration = Duration::from_millis(500);
+const NAT_HOLE_STUN_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const NAT_HOLE_CACHED_RESPONSE_TTL: Duration = Duration::from_secs(30);
 const NAT_HOLE_CACHED_RESPONSE_LIMIT: usize = 256;
 const NAT_HOLE_WAITER_LIMIT: usize = 64;
@@ -66,6 +67,7 @@ struct ClientState {
     nat_hole_waiters: Arc<Mutex<HashMap<String, Vec<oneshot::Sender<NatHoleResponse>>>>>,
     nat_hole_cached: Arc<Mutex<HashMap<String, NatHoleCachedResponse>>>,
     nat_hole_waiting: Arc<Mutex<HashMap<String, Instant>>>,
+    stun_server_addrs: Arc<OnceCell<Vec<SocketAddr>>>,
     xtcp_direct_failures: Arc<Mutex<HashMap<String, Instant>>>,
     xtcp_direct_peers: Arc<Mutex<HashMap<String, XtcpDirectPeer>>>,
     writer: Arc<Mutex<WriteHalf<BoxStream>>>,
@@ -257,6 +259,7 @@ async fn run_session(cfg: Arc<ClientConfig>) -> Result<()> {
         nat_hole_waiters: Arc::new(Mutex::new(HashMap::new())),
         nat_hole_cached: Arc::new(Mutex::new(HashMap::new())),
         nat_hole_waiting: Arc::new(Mutex::new(HashMap::new())),
+        stun_server_addrs: Arc::new(OnceCell::new()),
         xtcp_direct_failures: Arc::new(Mutex::new(HashMap::new())),
         xtcp_direct_peers: Arc::new(Mutex::new(HashMap::new())),
         writer: Arc::new(Mutex::new(writer)),
@@ -587,39 +590,52 @@ async fn discover_sudp_mapped_addr(state: &ClientState, socket: &UdpSocket) -> O
     let local_addr = socket.local_addr().ok()?;
     let deadline = Instant::now() + NAT_HOLE_STUN_TIMEOUT;
     let remaining = deadline.checked_duration_since(Instant::now())?;
-    let server_addr = time::timeout(remaining, tokio::net::lookup_host(stun_server))
-        .await
-        .ok()?
-        .ok()?
+    let server_addrs = time::timeout(
+        remaining,
+        state.stun_server_addrs.get_or_try_init(|| async {
+            tokio::net::lookup_host(stun_server)
+                .await
+                .map(|addrs| addrs.collect::<Vec<_>>())
+        }),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let server_addr = server_addrs
+        .iter()
+        .copied()
         .find(|addr| addr.is_ipv4() == local_addr.is_ipv4())?;
     let (request, transaction_id) = stun::new_binding_request();
-    if let Err(err) = socket.send_to(&request, server_addr).await {
-        debug!("send SUDP STUN request to {server_addr} failed: {err:#}");
-        return None;
-    }
-
     let mut buf = [0_u8; 512];
-    loop {
-        let remaining = deadline.checked_duration_since(Instant::now())?;
-        let received = time::timeout(remaining, socket.recv_from(&mut buf)).await;
-        let (len, peer) = match received {
-            Ok(Ok(received)) => received,
-            Ok(Err(err)) => {
-                debug!("receive SUDP STUN response failed: {err:#}");
-                return None;
-            }
-            Err(_) => {
-                debug!("SUDP STUN request to {server_addr} timed out");
-                return None;
-            }
-        };
-        if peer != server_addr {
-            continue;
+    let mut attempts = 0_u8;
+    while deadline.checked_duration_since(Instant::now()).is_some() {
+        attempts += 1;
+        if let Err(err) = socket.send_to(&request, server_addr).await {
+            debug!("send SUDP STUN request to {server_addr} failed: {err:#}");
+            return None;
         }
-        if let Some(mapped_addr) = stun::parse_binding_response(&buf[..len], &transaction_id) {
-            return Some(mapped_addr);
+
+        let receive_deadline = deadline.min(Instant::now() + NAT_HOLE_STUN_RETRY_INTERVAL);
+        while let Some(remaining) = receive_deadline.checked_duration_since(Instant::now()) {
+            let received = time::timeout(remaining, socket.recv_from(&mut buf)).await;
+            let (len, peer) = match received {
+                Ok(Ok(received)) => received,
+                Ok(Err(err)) => {
+                    debug!("receive SUDP STUN response failed: {err:#}");
+                    return None;
+                }
+                Err(_) => break,
+            };
+            if peer != server_addr {
+                continue;
+            }
+            if let Some(mapped_addr) = stun::parse_binding_response(&buf[..len], &transaction_id) {
+                return Some(mapped_addr);
+            }
         }
     }
+    debug!("SUDP STUN request to {server_addr} timed out after {attempts} attempts");
+    None
 }
 
 fn push_direct_local_addr(
@@ -3154,6 +3170,7 @@ mod tests {
             nat_hole_waiters: Arc::new(Mutex::new(HashMap::new())),
             nat_hole_cached: Arc::new(Mutex::new(HashMap::new())),
             nat_hole_waiting: Arc::new(Mutex::new(HashMap::new())),
+            stun_server_addrs: Arc::new(OnceCell::new()),
             xtcp_direct_failures: Arc::new(Mutex::new(HashMap::new())),
             xtcp_direct_peers: Arc::new(Mutex::new(HashMap::new())),
             writer: Arc::new(Mutex::new(writer)),
@@ -3179,14 +3196,19 @@ mod tests {
     /// 启动仅处理一次 Binding Request 的测试 STUN 服务。
     async fn spawn_test_stun_server(
         mapped_addr: SocketAddr,
+        dropped_requests: usize,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let stun_server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let stun_addr = stun_server.local_addr().unwrap();
         let server_task = tokio::spawn(async move {
             let mut buf = [0_u8; 512];
-            let (len, peer) = stun_server.recv_from(&mut buf).await.unwrap();
-            let response = stun::binding_response(&buf[..len], mapped_addr).unwrap();
-            stun_server.send_to(&response, peer).await.unwrap();
+            for request_index in 0..=dropped_requests {
+                let (len, peer) = stun_server.recv_from(&mut buf).await.unwrap();
+                if request_index == dropped_requests {
+                    let response = stun::binding_response(&buf[..len], mapped_addr).unwrap();
+                    stun_server.send_to(&response, peer).await.unwrap();
+                }
+            }
         });
         (stun_addr, server_task)
     }
@@ -3195,7 +3217,7 @@ mod tests {
     #[tokio::test]
     async fn sudp_owner_candidates_prefer_stun_mapped_addr() {
         let mapped_addr: SocketAddr = "198.51.100.8:45678".parse().unwrap();
-        let (stun_addr, server_task) = spawn_test_stun_server(mapped_addr).await;
+        let (stun_addr, server_task) = spawn_test_stun_server(mapped_addr, 0).await;
 
         let (mut state, _server) = test_state();
         let mut cfg = (*state.cfg).clone();
@@ -3211,6 +3233,27 @@ mod tests {
             Some("198.51.100.8:45678")
         );
         assert!(candidates.contains(&owner_local_addr.to_string()));
+        assert_eq!(
+            state.stun_server_addrs.get().map(Vec::as_slice),
+            Some([stun_addr].as_slice())
+        );
+        server_task.await.unwrap();
+    }
+
+    /// 验证首个 Binding Request 丢失后仍会在总超时内重传并取得映射地址。
+    #[tokio::test]
+    async fn sudp_stun_retries_dropped_binding_request() {
+        let mapped_addr: SocketAddr = "198.51.100.10:45680".parse().unwrap();
+        let (stun_addr, server_task) = spawn_test_stun_server(mapped_addr, 1).await;
+        let (mut state, _server) = test_state();
+        let mut cfg = (*state.cfg).clone();
+        cfg.transport.nat_hole_stun_server = Some(stun_addr.to_string());
+        state.cfg = Arc::new(cfg);
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        let discovered = discover_sudp_mapped_addr(&state, &socket).await;
+
+        assert_eq!(discovered, Some(mapped_addr));
         server_task.await.unwrap();
     }
 
@@ -3218,7 +3261,7 @@ mod tests {
     #[tokio::test]
     async fn sudp_visitor_endpoint_caches_stun_mapped_addr() {
         let mapped_addr: SocketAddr = "198.51.100.9:45679".parse().unwrap();
-        let (stun_addr, server_task) = spawn_test_stun_server(mapped_addr).await;
+        let (stun_addr, server_task) = spawn_test_stun_server(mapped_addr, 0).await;
         let (mut state, _server) = test_state();
         let mut cfg = (*state.cfg).clone();
         cfg.transport.nat_hole_stun_server = Some(stun_addr.to_string());
