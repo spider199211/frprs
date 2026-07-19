@@ -69,6 +69,7 @@ struct Control {
 
 struct WorkPool {
     queue: Mutex<VecDeque<BoxStream>>,
+    capacity: usize,
     notify: Notify,
     queued: AtomicUsize,
     pending: AtomicUsize,
@@ -222,6 +223,7 @@ impl WorkPool {
     fn new(capacity: usize) -> Self {
         Self {
             queue: Mutex::new(VecDeque::with_capacity(capacity)),
+            capacity,
             notify: Notify::new(),
             queued: AtomicUsize::new(0),
             pending: AtomicUsize::new(0),
@@ -230,18 +232,26 @@ impl WorkPool {
         }
     }
 
-    async fn push(&self, stream: BoxStream) {
-        {
-            let mut queue = self.queue.lock().await;
-            queue.push_back(stream);
+    /// 接收一个 work connection；仅允许配置容量内的空闲连接或服务端已预订的连接入池。
+    async fn push(&self, stream: BoxStream) -> bool {
+        let mut queue = self.queue.lock().await;
+        let reserved = self.pending.load(Ordering::Acquire) > 0;
+        if !reserved && queue.len() >= self.capacity {
+            return false;
         }
+        queue.push_back(stream);
+        // 先发布 queued 再消费 pending，避免转换窗口让补池逻辑重复预订连接。
         self.queued.fetch_add(1, Ordering::Release);
-        let _ = self
-            .pending
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                value.checked_sub(1)
-            });
+        if reserved {
+            let _ = self
+                .pending
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                    value.checked_sub(1)
+                });
+        }
+        drop(queue);
         self.notify.notify_one();
+        true
     }
 
     async fn pop(&self) -> Option<BoxStream> {
@@ -818,7 +828,12 @@ async fn register_work_conn(state: ServerState, run_id: String, stream: BoxStrea
     }
     .ok_or_else(|| anyhow!("no active control for run_id {run_id}"))?;
 
-    control.work_pool.push(stream).await;
+    if !control.work_pool.push(stream).await {
+        debug!(
+            "drop unreserved work connection for full pool {}",
+            control.run_id
+        );
+    }
     Ok(())
 }
 
@@ -4761,6 +4776,37 @@ mod tests {
     async fn work_pool_preallocates_configured_queue_capacity() {
         let pool = WorkPool::new(8);
         assert!(pool.queue.lock().await.capacity() >= 8);
+        assert_eq!(pool.capacity, 8);
+    }
+
+    /// 验证未被服务端预订的空闲 work connection 不会突破配置池容量。
+    #[tokio::test]
+    async fn work_pool_rejects_unreserved_connections_above_capacity() {
+        let pool = WorkPool::new(2);
+
+        for expected in [true, true, false] {
+            let (client, _server) = duplex(64);
+            assert_eq!(pool.push(Box::new(client)).await, expected);
+        }
+
+        assert_eq!(pool.queued.load(Ordering::Acquire), 2);
+        assert_eq!(pool.queue.lock().await.len(), 2);
+    }
+
+    /// 验证并发 waiter 已预订的连接即使暂时超过空闲池容量也可入池，避免按需请求被误丢弃。
+    #[tokio::test]
+    async fn work_pool_accepts_reserved_connection_above_idle_capacity() {
+        let pool = WorkPool::new(1);
+        let (idle, _idle_peer) = duplex(64);
+        assert!(pool.push(Box::new(idle)).await);
+        assert_eq!(pool.reserve_missing(2), 1);
+
+        let (reserved, _reserved_peer) = duplex(64);
+        assert!(pool.push(Box::new(reserved)).await);
+
+        assert_eq!(pool.pending.load(Ordering::Acquire), 0);
+        assert_eq!(pool.queued.load(Ordering::Acquire), 2);
+        assert_eq!(pool.queue.lock().await.len(), 2);
     }
 
     #[tokio::test]

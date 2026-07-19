@@ -27,7 +27,7 @@ This is a Rust rewrite scaffold for `fatedier/frp`.
 - 服务端 `allowPorts` 端口白名单策略，限制 TCP/UDP 远端监听端口
 - Dashboard Admin API 支持运行时查看/替换 `allowPorts`
 - TCP `group`/`groupKey` 分组负载均衡，支持多个代理共享同一远端端口
-- 通过 `poolCount` 预创建 work connection 连接池、按池大小预分配队列，合并高并发下的补池请求，按等待者即时需求精确请求连接，并限制客户端 work connection 建连并发
+- 通过 `poolCount` 预创建 work connection 连接池、按池大小预分配并限制空闲队列，允许服务端已预订的 waiter 连接临时扩容，合并高并发下的补池请求，按等待者即时需求精确请求连接，并限制客户端 work connection 建连并发
 - 通过 `bandwidthLimit` 对 TCP/HTTP/HTTPS 做带宽限制
 - UDP 本地会话复用、双向批量转发、分组批量转发、非阻塞批处理队列、截止时间批窗口、批处理热路径缓存和 `group`/`groupKey` 分组负载均衡
 - `frpc` 根据配置文件修改时间自动热加载
@@ -268,7 +268,7 @@ cargo run --bin frpc -- -c conf/frpc.toml
 - HTTPS：已实现 SNI 嗅探、原始 TLS 透传、通配域名、`*` 兜底路由和分组负载均衡。
 - TCP mux：已实现基于 HTTP CONNECT 的基础隧道路由和分组负载均衡。
 - 健康检查：已实现 TCP/HTTP 健康检查，并在 Dashboard/API 中暴露代理健康状态。
-- 连接池：已通过 `poolCount` 实现预创建 work connection、按池大小预分配队列，合并高并发补池请求，按等待者即时需求精确请求连接，并限制客户端 work connection 建连并发；TCP stream mux/QUIC 传输会在同一 client session 上复用 control/work stream。
+- 连接池：已通过 `poolCount` 实现预创建 work connection、按池大小预分配并限制空闲队列、允许已预订 waiter 连接临时扩容、合并高并发补池请求、按等待者即时需求精确请求连接，并限制客户端 work connection 建连并发；TCP stream mux/QUIC 传输会在同一 client session 上复用 control/work stream。
 - 带宽限制：已实现按代理限速。
 - Dashboard：已实现内置状态页面、客户端/代理/分组/指标 JSON API 和关闭代理/分组/客户端代理 Admin API。
 - 插件：已实现服务端登录、新代理、TCP/UDP/SUDP/HTTP/HTTPS/TCPMUX 新用户连接、关闭代理 plain HTTP 钩子，并补充 frp 风格 `op` 字段。
@@ -306,7 +306,7 @@ The current milestone implements the core reverse TCP proxy path:
 - server-side `allowPorts` policy for TCP/UDP remote listeners
 - dashboard Admin API for viewing/replacing `allowPorts` at runtime
 - TCP `group`/`groupKey` load balancing across multiple proxies sharing one remote port
-- pre-opened TCP work connection pools with `poolCount`, queue preallocation by pool size, coalesced replenish requests under concurrent load, demand-aware waiter requests, and bounded client-side work-connection dialing
+- pre-opened TCP work connection pools with `poolCount`, idle-queue preallocation and bounds by pool size, temporary capacity for server-reserved waiter connections, coalesced replenish requests under concurrent load, demand-aware waiter requests, and bounded client-side work-connection dialing
 - TCP/HTTP/HTTPS bandwidth limiting with `bandwidthLimit`
 - UDP local session reuse, bidirectional batching, nonblocking batch queues, deadline-based batch windows, batch-path caching, and `group`/`groupKey` load balancing
 - frpc config hot reload by file modification time
@@ -499,7 +499,7 @@ Parity roadmap:
 - HTTPS: SNI sniffing, raw TLS passthrough routing, wildcard domains, `*` fallback routing, and group load balancing implemented.
 - TCP mux: basic HTTP CONNECT tunnel routing and group load balancing implemented.
 - Health checks: TCP and HTTP health checks implemented, with proxy health status exposed through the Dashboard/API.
-- Connection pool: pre-opened work connections implemented through `poolCount`, with queue preallocation by pool size, coalesced replenish requests, demand-aware waiter requests, bounded client-side work-connection dialing, and TCP stream mux/QUIC client-session reuse for control/work streams.
+- Connection pool: pre-opened work connections implemented through `poolCount`, with idle-queue preallocation and bounds by pool size, temporary capacity for server-reserved waiter connections, coalesced replenish requests, demand-aware waiter requests, bounded client-side work-connection dialing, and TCP stream mux/QUIC client-session reuse for control/work streams.
 - Bandwidth limit: per-proxy byte throttling implemented for stream proxies.
 - Dashboard: built-in status page, client/proxy/group/metrics JSON APIs, and close-proxy/group/client Admin APIs implemented.
 - Plugins: basic plain-HTTP login, new-proxy, TCP/UDP/SUDP/HTTP/HTTPS/TCPMUX new-user-connection, and close-proxy hooks implemented, with frp-style `op` fields.
