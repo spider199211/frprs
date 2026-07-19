@@ -876,7 +876,8 @@ async fn handle_nat_hole_register(
         },
         Ok(NatHoleOutcome::Matched(candidate)) => {
             let Some(candidate) =
-                take_live_nat_hole_candidate(&state, &current_peer, sk.as_deref(), candidate).await
+                take_ready_nat_hole_candidate(&state, &current_peer, sk.as_deref(), candidate)
+                    .await
             else {
                 return Message::NatHoleResp {
                     transaction_id,
@@ -889,7 +890,6 @@ async fn handle_nat_hole_register(
                     error: String::new(),
                 };
             };
-            notify_nat_hole_peer(state, current_peer.clone(), &candidate).await;
             Message::NatHoleResp {
                 transaction_id,
                 proxy_name,
@@ -918,27 +918,33 @@ async fn handle_nat_hole_register(
     }
 }
 
-/// 过滤已断开控制连接的 NAT 候选，并在同一事务/代理会话中继续选择在线 peer。
-async fn take_live_nat_hole_candidate(
+/// 过滤不可通知的 NAT 候选，并在同一事务、代理和密钥范围内继续选择可用 peer。
+async fn take_ready_nat_hole_candidate(
     state: &ServerState,
     current_peer: &NatHolePeer,
     sk: Option<&str>,
     mut candidate: NatHoleCandidate,
 ) -> Option<NatHoleCandidate> {
     loop {
-        let connected = state
-            .controls
-            .lock()
-            .await
-            .contains_key(&candidate.peer_run_id);
-        if connected {
-            return Some(candidate);
+        let peer_control = {
+            let controls = state.controls.lock().await;
+            controls.get(&candidate.peer_run_id).cloned()
+        };
+        if let Some(peer_control) = peer_control {
+            if notify_nat_hole_peer(&peer_control, current_peer, &candidate).await {
+                return Some(candidate);
+            }
+            debug!(
+                "prune unnotifiable nat hole peer {} for transaction {}/{}",
+                candidate.peer_run_id, current_peer.transaction_id, current_peer.proxy_name
+            );
+        } else {
+            debug!(
+                "prune disconnected nat hole peer {} for transaction {}/{}",
+                candidate.peer_run_id, current_peer.transaction_id, current_peer.proxy_name
+            );
         }
 
-        debug!(
-            "prune disconnected nat hole peer {} for transaction {}/{}",
-            candidate.peer_run_id, current_peer.transaction_id, current_peer.proxy_name
-        );
         if state.nathole.remove_run_id(&candidate.peer_run_id) == 0 {
             return None;
         }
@@ -951,25 +957,15 @@ async fn take_live_nat_hole_candidate(
     }
 }
 
+/// 向已定位的对端控制连接发送匹配通知；写入失败时返回 `false` 以触发候选重选。
 async fn notify_nat_hole_peer(
-    state: ServerState,
-    current_peer: NatHolePeer,
+    peer_control: &Control,
+    current_peer: &NatHolePeer,
     candidate: &NatHoleCandidate,
-) {
+) -> bool {
     if candidate.peer_run_id == current_peer.run_id {
-        return;
+        return true;
     }
-    let peer_control = {
-        let controls = state.controls.lock().await;
-        controls.get(&candidate.peer_run_id).cloned()
-    };
-    let Some(peer_control) = peer_control else {
-        debug!(
-            "nat hole peer control {} is no longer connected",
-            candidate.peer_run_id
-        );
-        return;
-    };
     let msg = Message::NatHoleResp {
         transaction_id: current_peer.transaction_id.clone(),
         proxy_name: current_peer.proxy_name.clone(),
@@ -989,7 +985,9 @@ async fn notify_nat_hole_peer(
             "notify nat hole peer {} for transaction {} failed: {err:#}",
             candidate.peer_run_id, current_peer.transaction_id
         );
+        return false;
     }
+    true
 }
 
 async fn handle_stcp_visitor_conn(
@@ -4495,6 +4493,91 @@ mod tests {
                 .nathole
                 .candidate_for("tx-live-peer", "xtcp-ssh", NatHoleRole::Visitor)
                 .expect("live owner should remain registered")
+                .peer_run_id,
+            "owner-live"
+        );
+    }
+
+    /// 验证控制连接仍在索引中但已无法写入时，NAT 匹配会剪枝该候选并通知下一在线 peer。
+    #[tokio::test]
+    async fn nat_hole_match_skips_unnotifiable_peer() {
+        let (failed_owner, failed_stream) = test_control_with_run_id("owner-failed", 0);
+        let (live_owner, mut live_stream) = test_control_with_run_id("owner-live", 0);
+        let (visitor_control, _visitor_stream) = test_control_with_run_id("visitor-run", 0);
+        drop(failed_stream);
+        let state = test_server_state(vec![
+            failed_owner.clone(),
+            live_owner.clone(),
+            visitor_control.clone(),
+        ]);
+
+        for (control, peer, local_addr) in [
+            (
+                failed_owner,
+                "127.0.0.1:7001",
+                "10.0.0.10:10001".to_string(),
+            ),
+            (live_owner, "127.0.0.1:7002", "10.0.0.11:10002".to_string()),
+        ] {
+            let resp = handle_nat_hole_register(
+                state.clone(),
+                control,
+                peer.parse().unwrap(),
+                "tx-notify".to_string(),
+                "sudp-private".to_string(),
+                "server".to_string(),
+                Some("secret".to_string()),
+                vec![local_addr],
+            )
+            .await;
+            assert!(matches!(resp, Message::NatHoleResp { waiting: true, .. }));
+        }
+
+        let visitor_resp = handle_nat_hole_register(
+            state.clone(),
+            visitor_control,
+            "127.0.0.1:7003".parse().unwrap(),
+            "tx-notify".to_string(),
+            "sudp-private".to_string(),
+            "visitor".to_string(),
+            Some("secret".to_string()),
+            vec!["10.0.0.20:10003".to_string()],
+        )
+        .await;
+        match visitor_resp {
+            Message::NatHoleResp {
+                peer_observed_addr,
+                waiting,
+                error,
+                ..
+            } => {
+                assert_eq!(peer_observed_addr, "127.0.0.1:7002");
+                assert!(!waiting);
+                assert!(error.is_empty());
+            }
+            other => panic!("unexpected visitor response: {other:?}"),
+        }
+        assert!(matches!(
+            time::timeout(Duration::from_secs(1), read_msg(&mut live_stream))
+                .await
+                .unwrap()
+                .unwrap(),
+            Message::NatHoleResp {
+                waiting: false,
+                ref error,
+                ..
+            } if error.is_empty()
+        ));
+        assert_eq!(
+            state
+                .nathole
+                .candidate_for_secret(
+                    "tx-notify",
+                    "sudp-private",
+                    NatHoleRole::Visitor,
+                    Some("secret"),
+                )
+                .expect("live owner should remain after failed notification reselection")
                 .peer_run_id,
             "owner-live"
         );
