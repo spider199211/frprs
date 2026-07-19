@@ -4302,7 +4302,7 @@ mod tests {
         }
         assert!(state
             .nathole
-            .candidate_for("tx-too-many-addrs", NatHoleRole::Visitor)
+            .candidate_for("tx-too-many-addrs", "xtcp-ssh", NatHoleRole::Visitor)
             .is_none());
     }
 

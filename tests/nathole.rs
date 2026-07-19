@@ -42,7 +42,7 @@ fn nat_hole_controller_exchanges_candidates_between_roles() {
     );
 
     let owner_candidate = controller
-        .candidate_for("tx-e2e", NatHoleRole::Server)
+        .candidate_for("tx-e2e", "xtcp-api", NatHoleRole::Server)
         .expect("owner should receive visitor candidate");
     assert_eq!(owner_candidate.peer_run_id, "visitor-run");
     assert_eq!(owner_candidate.observed_addr, addr(47002));

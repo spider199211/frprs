@@ -164,9 +164,11 @@ impl NatHoleController {
         )
     }
 
+    /// 按事务与代理双键查询指定角色可用的对端候选，避免同名事务跨代理串线。
     pub fn candidate_for(
         &self,
         transaction_id: &str,
+        proxy_name: &str,
         role: NatHoleRole,
     ) -> Option<NatHoleCandidate> {
         let now = Instant::now();
@@ -175,31 +177,31 @@ impl NatHoleController {
         if should_cleanup {
             Self::cleanup_locked(&mut sessions, self.ttl, now);
         }
-        let key = sessions
-            .keys()
-            .find(|key| key.transaction_id == transaction_id)
-            .cloned();
+        let key = NatHoleSessionKey {
+            transaction_id: transaction_id.to_string(),
+            proxy_name: proxy_name.to_string(),
+        };
         let mut remove_session = false;
-        let candidate = key.as_ref().and_then(|key| {
-            sessions.get_mut(key).and_then(|session| {
-                let candidate = Self::candidate_from_session(session, role, None, self.ttl, now);
-                remove_session = Self::session_is_empty_and_expired(session, self.ttl, now);
-                candidate
-            })
+        let candidate = sessions.get_mut(&key).and_then(|session| {
+            let candidate = Self::candidate_from_session(session, role, None, self.ttl, now);
+            remove_session = Self::session_is_empty_and_expired(session, self.ttl, now);
+            candidate
         });
         if remove_session {
-            if let Some(key) = key {
-                sessions.remove(&key);
-            }
+            sessions.remove(&key);
         }
         candidate
     }
 
-    pub fn remove(&self, transaction_id: &str) -> bool {
+    /// 删除指定事务与代理对应的会话，不影响复用同一事务 ID 的其他代理。
+    pub fn remove(&self, transaction_id: &str, proxy_name: &str) -> bool {
         let mut sessions = self.sessions.lock().expect("nathole mutex poisoned");
-        let before = sessions.len();
-        sessions.retain(|key, _| key.transaction_id != transaction_id);
-        sessions.len() != before
+        sessions
+            .remove(&NatHoleSessionKey {
+                transaction_id: transaction_id.to_string(),
+                proxy_name: proxy_name.to_string(),
+            })
+            .is_some()
     }
 
     pub fn remove_run_id(&self, run_id: &str) -> usize {
@@ -408,7 +410,7 @@ mod tests {
         );
 
         let owner_candidate = controller
-            .candidate_for("tx-1", NatHoleRole::Server)
+            .candidate_for("tx-1", "xtcp-ssh", NatHoleRole::Server)
             .expect("owner should see visitor candidate");
         assert_eq!(owner_candidate.peer_run_id, "visitor");
         assert_eq!(owner_candidate.observed_addr, addr(7002));
@@ -473,10 +475,10 @@ mod tests {
         );
 
         let first = controller
-            .candidate_for("tx-group", NatHoleRole::Server)
+            .candidate_for("tx-group", "sudp-group", NatHoleRole::Server)
             .unwrap();
         let second = controller
-            .candidate_for("tx-group", NatHoleRole::Server)
+            .candidate_for("tx-group", "sudp-group", NatHoleRole::Server)
             .unwrap();
         assert_eq!(first.peer_run_id, "visitor-a");
         assert_eq!(second.peer_run_id, "visitor-b");
@@ -914,6 +916,7 @@ mod tests {
             .contains_key(&session_key("tx-stale-unrelated", "xtcp-prune")));
     }
 
+    /// 验证同一事务 ID 下的候选查询与删除都严格按代理名隔离。
     #[test]
     fn isolates_same_transaction_id_by_proxy_name() {
         let controller = NatHoleController::default();
@@ -983,8 +986,33 @@ mod tests {
             other => panic!("unexpected xtcp-b outcome: {other:?}"),
         }
 
+        let candidate_a = controller
+            .candidate_for("shared-tx", "xtcp-a", NatHoleRole::Server)
+            .expect("xtcp-a owner should see its visitor");
+        assert_eq!(candidate_a.peer_run_id, "visitor-a");
+        let candidate_b = controller
+            .candidate_for("shared-tx", "xtcp-b", NatHoleRole::Server)
+            .expect("xtcp-b owner should see its visitor");
+        assert_eq!(candidate_b.peer_run_id, "visitor-b");
+        assert!(controller
+            .candidate_for("shared-tx", "xtcp-missing", NatHoleRole::Server)
+            .is_none());
+
+        assert!(controller.remove("shared-tx", "xtcp-a"));
+        assert!(controller
+            .candidate_for("shared-tx", "xtcp-a", NatHoleRole::Server)
+            .is_none());
+        assert_eq!(
+            controller
+                .candidate_for("shared-tx", "xtcp-b", NatHoleRole::Server)
+                .expect("removing xtcp-a must not remove xtcp-b")
+                .peer_run_id,
+            "visitor-b"
+        );
+        assert!(!controller.remove("shared-tx", "xtcp-missing"));
+
         let sessions = controller.sessions.lock().unwrap();
-        assert!(sessions.contains_key(&session_key("shared-tx", "xtcp-a")));
+        assert!(!sessions.contains_key(&session_key("shared-tx", "xtcp-a")));
         assert!(sessions.contains_key(&session_key("shared-tx", "xtcp-b")));
     }
 
@@ -1013,16 +1041,16 @@ mod tests {
         assert_eq!(controller.remove_run_id("owner-gone"), 2);
 
         let candidate = controller
-            .candidate_for("tx-shared", NatHoleRole::Visitor)
+            .candidate_for("tx-shared", "xtcp-group", NatHoleRole::Visitor)
             .expect("remaining visitor should still see live owner");
         assert_eq!(candidate.peer_run_id, "owner-live");
         assert!(controller
-            .candidate_for("tx-empty", NatHoleRole::Visitor)
+            .candidate_for("tx-empty", "xtcp-group", NatHoleRole::Visitor)
             .is_none());
 
         assert_eq!(controller.remove_run_id("visitor-gone"), 1);
         assert!(controller
-            .candidate_for("tx-shared", NatHoleRole::Server)
+            .candidate_for("tx-shared", "xtcp-group", NatHoleRole::Server)
             .is_none());
         assert_eq!(controller.remove_run_id("missing"), 0);
     }
