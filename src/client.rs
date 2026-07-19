@@ -55,7 +55,7 @@ struct ClientState {
     udp_sessions: Arc<Mutex<HashMap<(String, String), Arc<UdpSocket>>>>,
     sudp_visitor_sessions: Arc<Mutex<HashMap<String, SudpVisitorSession>>>,
     sudp_direct_owner_sockets: Arc<Mutex<HashMap<String, Arc<UdpSocket>>>>,
-    sudp_direct_visitor_sockets: Arc<Mutex<HashMap<String, Arc<UdpSocket>>>>,
+    sudp_direct_visitor_sockets: Arc<Mutex<HashMap<String, SudpDirectVisitorEndpoint>>>,
     sudp_direct_visitor_sessions: Arc<Mutex<HashMap<String, Instant>>>,
     sudp_direct_visitor_tasks: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     sudp_direct_visitor_peers: Arc<Mutex<HashMap<String, SudpDirectPeer>>>,
@@ -111,6 +111,13 @@ struct SudpDirectOwnerSession {
     peer: Arc<Mutex<SocketAddr>>,
     updated_at: StdMutex<Instant>,
     task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+/// 保存 SUDP visitor 直连 socket 及该 socket 已发现的候选地址。
+#[derive(Clone)]
+struct SudpDirectVisitorEndpoint {
+    socket: Arc<UdpSocket>,
+    candidate_addrs: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -546,8 +553,8 @@ async fn direct_local_addrs(state: &ClientState, bound_addr: SocketAddr) -> Vec<
     addrs
 }
 
-/// 合并 SUDP owner 的本地候选与由同一 UDP socket 探测到的公网映射候选。
-async fn sudp_owner_candidate_addrs(
+/// 合并 SUDP 直连 socket 的本地候选与由同一 socket 探测到的公网映射候选。
+async fn sudp_socket_candidate_addrs(
     state: &ClientState,
     socket: &UdpSocket,
     bound_addr: SocketAddr,
@@ -578,8 +585,11 @@ async fn discover_sudp_mapped_addr(state: &ClientState, socket: &UdpSocket) -> O
         .as_deref()
         .filter(|server| !server.trim().is_empty())?;
     let local_addr = socket.local_addr().ok()?;
-    let server_addr = tokio::net::lookup_host(stun_server)
+    let deadline = Instant::now() + NAT_HOLE_STUN_TIMEOUT;
+    let remaining = deadline.checked_duration_since(Instant::now())?;
+    let server_addr = time::timeout(remaining, tokio::net::lookup_host(stun_server))
         .await
+        .ok()?
         .ok()?
         .find(|addr| addr.is_ipv4() == local_addr.is_ipv4())?;
     let (request, transaction_id) = stun::new_binding_request();
@@ -588,7 +598,6 @@ async fn discover_sudp_mapped_addr(state: &ClientState, socket: &UdpSocket) -> O
         return None;
     }
 
-    let deadline = Instant::now() + NAT_HOLE_STUN_TIMEOUT;
     let mut buf = [0_u8; 512];
     loop {
         let remaining = deadline.checked_duration_since(Instant::now())?;
@@ -1703,7 +1712,7 @@ async fn start_sudp_direct_owner_listener(state: ClientState, proxy: ProxyConfig
             .with_context(|| format!("listen sudp direct owner {}", proxy.name))?,
     );
     let local_addr = socket.local_addr().context("read sudp direct owner addr")?;
-    let local_addrs = sudp_owner_candidate_addrs(&state, &socket, local_addr).await;
+    let local_addrs = sudp_socket_candidate_addrs(&state, &socket, local_addr).await;
     let advertised_addr = if local_addrs.is_empty() {
         local_addr.to_string()
     } else {
@@ -1970,7 +1979,8 @@ async fn try_sudp_direct_visitor(
         return Ok(false);
     }
 
-    let direct_socket = sudp_direct_visitor_socket(state, visitor, session_id).await?;
+    let direct_endpoint = sudp_direct_visitor_socket(state, visitor, session_id).await?;
+    let direct_socket = direct_endpoint.socket;
     if let Some(peer) = take_fresh_sudp_direct_peer(state, session_id).await {
         match send_sudp_direct_payload(&direct_socket, visitor, session_id, content, peer).await {
             Ok(()) => {
@@ -1988,17 +1998,13 @@ async fn try_sudp_direct_visitor(
         }
     }
 
-    let local_addrs = match direct_socket.local_addr() {
-        Ok(addr) => direct_local_addrs(state, addr).await,
-        Err(_) => Vec::new(),
-    };
     let resp = match request_nat_hole_with_grace_secret(
         state,
         &visitor.server_name,
         &visitor.server_name,
         "visitor",
         visitor.sk.clone(),
-        local_addrs,
+        direct_endpoint.candidate_addrs,
         Duration::from_millis(500),
     )
     .await
@@ -2210,11 +2216,11 @@ fn schedule_sudp_direct_probe_retries(
                     .get(&session_id)
                     .cloned()
             };
-            let Some(socket) = socket else {
+            let Some(endpoint) = socket else {
                 break;
             };
             if let Err(err) =
-                send_sudp_direct_probe(&socket, &visitor, &session_id, &candidates).await
+                send_sudp_direct_probe(&endpoint.socket, &visitor, &session_id, &candidates).await
             {
                 debug!("sudp direct probe retry failed: {err:#}");
             }
@@ -2372,8 +2378,8 @@ async fn sudp_direct_visitor_socket(
     state: &ClientState,
     visitor: &VisitorConfig,
     session_id: &str,
-) -> Result<Arc<UdpSocket>> {
-    if let Some(socket) = state
+) -> Result<SudpDirectVisitorEndpoint> {
+    if let Some(endpoint) = state
         .sudp_direct_visitor_sockets
         .lock()
         .await
@@ -2381,10 +2387,15 @@ async fn sudp_direct_visitor_socket(
         .cloned()
     {
         touch_sudp_direct_visitor_session(state, session_id).await;
-        ensure_sudp_direct_visitor_task(state, session_id, &visitor.server_name, socket.clone())
-            .await;
+        ensure_sudp_direct_visitor_task(
+            state,
+            session_id,
+            &visitor.server_name,
+            endpoint.socket.clone(),
+        )
+        .await;
         enforce_sudp_direct_visitor_session_limit(state, session_id).await;
-        return Ok(socket);
+        return Ok(endpoint);
     }
 
     let socket = Arc::new(
@@ -2392,19 +2403,34 @@ async fn sudp_direct_visitor_socket(
             .await
             .context("bind sudp direct visitor socket")?,
     );
-    let socket = {
+    let local_addr = socket
+        .local_addr()
+        .context("read sudp direct visitor socket address")?;
+    // 必须在启动常驻接收任务前完成 STUN，避免两个 recv_from 竞争同一响应。
+    let candidate_addrs = sudp_socket_candidate_addrs(state, &socket, local_addr).await;
+    let endpoint = SudpDirectVisitorEndpoint {
+        socket,
+        candidate_addrs,
+    };
+    let endpoint = {
         let mut sockets = state.sudp_direct_visitor_sockets.lock().await;
         if let Some(existing) = sockets.get(session_id) {
             existing.clone()
         } else {
-            sockets.insert(session_id.to_string(), socket.clone());
-            socket
+            sockets.insert(session_id.to_string(), endpoint.clone());
+            endpoint
         }
     };
     touch_sudp_direct_visitor_session(state, session_id).await;
-    ensure_sudp_direct_visitor_task(state, session_id, &visitor.server_name, socket.clone()).await;
+    ensure_sudp_direct_visitor_task(
+        state,
+        session_id,
+        &visitor.server_name,
+        endpoint.socket.clone(),
+    )
+    .await;
     enforce_sudp_direct_visitor_session_limit(state, session_id).await;
-    Ok(socket)
+    Ok(endpoint)
 }
 
 async fn ensure_sudp_direct_visitor_task(
@@ -2485,7 +2511,7 @@ fn spawn_sudp_direct_visitor_response_loop(
             .lock()
             .await
             .get(&session_id)
-            .map(|current| Arc::ptr_eq(current, &socket))
+            .map(|current| Arc::ptr_eq(&current.socket, &socket))
             .unwrap_or(false);
         if owns_session {
             remove_sudp_direct_visitor_session_state(&state, &session_id, false).await;
@@ -3150,18 +3176,26 @@ mod tests {
         );
     }
 
-    /// 验证 SUDP owner 会通过直连 socket 获取 STUN 映射，并将其置于本地候选之前。
-    #[tokio::test]
-    async fn sudp_owner_candidates_prefer_stun_mapped_addr() {
+    /// 启动仅处理一次 Binding Request 的测试 STUN 服务。
+    async fn spawn_test_stun_server(
+        mapped_addr: SocketAddr,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let stun_server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let stun_addr = stun_server.local_addr().unwrap();
-        let mapped_addr: SocketAddr = "198.51.100.8:45678".parse().unwrap();
         let server_task = tokio::spawn(async move {
             let mut buf = [0_u8; 512];
             let (len, peer) = stun_server.recv_from(&mut buf).await.unwrap();
             let response = stun::binding_response(&buf[..len], mapped_addr).unwrap();
             stun_server.send_to(&response, peer).await.unwrap();
         });
+        (stun_addr, server_task)
+    }
+
+    /// 验证 SUDP owner 会通过直连 socket 获取 STUN 映射，并将其置于本地候选之前。
+    #[tokio::test]
+    async fn sudp_owner_candidates_prefer_stun_mapped_addr() {
+        let mapped_addr: SocketAddr = "198.51.100.8:45678".parse().unwrap();
+        let (stun_addr, server_task) = spawn_test_stun_server(mapped_addr).await;
 
         let (mut state, _server) = test_state();
         let mut cfg = (*state.cfg).clone();
@@ -3170,7 +3204,7 @@ mod tests {
         let owner_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let owner_local_addr = owner_socket.local_addr().unwrap();
 
-        let candidates = sudp_owner_candidate_addrs(&state, &owner_socket, owner_local_addr).await;
+        let candidates = sudp_socket_candidate_addrs(&state, &owner_socket, owner_local_addr).await;
 
         assert_eq!(
             candidates.first().map(String::as_str),
@@ -3178,6 +3212,40 @@ mod tests {
         );
         assert!(candidates.contains(&owner_local_addr.to_string()));
         server_task.await.unwrap();
+    }
+
+    /// 验证 SUDP visitor 在启动接收任务前缓存同一 socket 的 STUN 映射候选。
+    #[tokio::test]
+    async fn sudp_visitor_endpoint_caches_stun_mapped_addr() {
+        let mapped_addr: SocketAddr = "198.51.100.9:45679".parse().unwrap();
+        let (stun_addr, server_task) = spawn_test_stun_server(mapped_addr).await;
+        let (mut state, _server) = test_state();
+        let mut cfg = (*state.cfg).clone();
+        cfg.transport.nat_hole_stun_server = Some(stun_addr.to_string());
+        state.cfg = Arc::new(cfg);
+        let visitor = VisitorConfig {
+            name: "visitor".to_string(),
+            visitor_type: ProxyType::Sudp,
+            server_name: "sudp-echo".to_string(),
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            sk: Some("secret".to_string()),
+        };
+        let session_id = "visitor|127.0.0.1:50000";
+
+        let endpoint = sudp_direct_visitor_socket(&state, &visitor, session_id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            endpoint.candidate_addrs.first().map(String::as_str),
+            Some("198.51.100.9:45679")
+        );
+        assert!(endpoint
+            .candidate_addrs
+            .contains(&endpoint.socket.local_addr().unwrap().to_string()));
+        server_task.await.unwrap();
+        remove_sudp_direct_visitor_session_state(&state, session_id, true).await;
     }
 
     #[test]
@@ -4237,11 +4305,13 @@ mod tests {
         let (state, _server) = test_state();
         let session_id = "visitor|127.0.0.1:50001".to_string();
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        state
-            .sudp_direct_visitor_sockets
-            .lock()
-            .await
-            .insert(session_id.clone(), socket);
+        state.sudp_direct_visitor_sockets.lock().await.insert(
+            session_id.clone(),
+            SudpDirectVisitorEndpoint {
+                socket,
+                candidate_addrs: Vec::new(),
+            },
+        );
         state.sudp_direct_pending.lock().await.insert(
             session_id.clone(),
             VecDeque::from([sudp_direct_visitor_frame(
@@ -4301,11 +4371,13 @@ mod tests {
         let (state, _server) = test_state();
         let session_id = "visitor|127.0.0.1:50002".to_string();
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        state
-            .sudp_direct_visitor_sockets
-            .lock()
-            .await
-            .insert(session_id.clone(), socket);
+        state.sudp_direct_visitor_sockets.lock().await.insert(
+            session_id.clone(),
+            SudpDirectVisitorEndpoint {
+                socket,
+                candidate_addrs: Vec::new(),
+            },
+        );
         state.sudp_direct_pending.lock().await.insert(
             session_id.clone(),
             VecDeque::from([sudp_direct_visitor_frame(

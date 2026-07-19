@@ -76,7 +76,7 @@ pub struct ClientPluginConfig {
 pub struct TransportConfig {
     #[serde(default = "default_transport_protocol")]
     pub protocol: TransportProtocol,
-    /// 可选的 RFC 5389 STUN 服务地址，用于发现 SUDP owner 的公网映射。
+    /// 可选的 RFC 5389 STUN 服务地址，用于发现 SUDP 直连 socket 的公网映射。
     #[serde(rename = "natHoleStunServer", default)]
     pub nat_hole_stun_server: Option<String>,
 }
